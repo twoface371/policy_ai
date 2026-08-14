@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 법·정책 동향 분석 플랫폼</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Malgun Gothic','맑은 고딕',-apple-system,sans-serif;
+  background:#F5F6F8;color:#1e1e20;line-height:1.6;font-size:14px}
+a{color:#1F3864}
+header{background:#1F3864;color:#fff;padding:14px 24px;display:flex;
+  align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+header h1{font-size:18px;font-weight:600}
+header .sub{font-size:12px;opacity:.8;margin-top:2px}
+.badge{font-size:12px;background:rgba(255,255,255,.15);padding:4px 10px;border-radius:12px}
+nav{background:#fff;border-bottom:1px solid #dfe1e6;padding:0 24px;display:flex;gap:2px;
+  overflow-x:auto}
+nav button{background:none;border:none;padding:12px 18px;font-size:14px;cursor:pointer;
+  color:#5c5f66;border-bottom:2px solid transparent;white-space:nowrap;font-family:inherit}
+nav button.on{color:#1F3864;border-bottom-color:#1F3864;font-weight:600}
+main{max-width:1180px;margin:0 auto;padding:22px 24px 60px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;
+  margin-bottom:22px}
+.card{background:#fff;border:1px solid #e3e5e9;border-radius:8px;padding:14px 16px}
+.card .n{font-size:24px;font-weight:600;color:#1F3864}
+.card .l{font-size:12px;color:#70737a;margin-top:2px}
+.panel{background:#fff;border:1px solid #e3e5e9;border-radius:8px;padding:18px 20px;
+  margin-bottom:18px}
+.panel h2{font-size:15px;font-weight:600;margin-bottom:12px;color:#1F3864}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+input,select{font-family:inherit;font-size:14px;padding:7px 10px;
+  border:1px solid #cfd2d8;border-radius:5px;background:#fff}
+input:focus,select:focus{outline:2px solid #b7c6e0;outline-offset:-1px}
+button.b{background:#1F3864;color:#fff;border:none;padding:8px 16px;border-radius:5px;
+  cursor:pointer;font-size:14px;font-family:inherit}
+button.b:hover{background:#2a4a80}
+button.g{background:#fff;color:#1F3864;border:1px solid #1F3864}
+button.g:hover{background:#eef2f9}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:#f0f2f5;text-align:left;padding:9px 10px;font-weight:600;color:#40434a;
+  border-bottom:1px solid #dfe1e6;white-space:nowrap}
+td{padding:9px 10px;border-bottom:1px solid #eceef1;vertical-align:top}
+tr:hover td{background:#fafbfc}
+.tag{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;white-space:nowrap}
+.t-restrict{background:#fdecec;color:#a32d2d}
+.t-relax{background:#e6f4ec;color:#0f6e56}
+.t-neutral{background:#f0f1f3;color:#5f5e5a}
+.t-check{background:#fdf4e3;color:#854f0b}
+.t-none{background:#f0f1f3;color:#8a8d94}
+.t-full{background:#e6f4ec;color:#0f6e56}
+.t-screened{background:#eef2f9;color:#1F3864}
+.t-partial{background:#fdf4e3;color:#854f0b}
+.t-fallback{background:#fdecec;color:#a32d2d}
+/* 조항호목 표시 — 좌측에 좌표, 우측에 본문 */
+.node{display:grid;grid-template-columns:190px 1fr;gap:10px;padding:3px 0;
+  border-bottom:1px solid #f2f3f5;font-size:13px}
+.node .cite{color:#8a8d94;font-size:11.5px;text-align:right;padding-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.node.d1{margin-top:12px;border-bottom:1px solid #dfe1e6}
+.node.d1 .ntext{font-weight:600;color:#1F3864}
+.node.d2 .ntext{padding-left:10px}
+.node.d3 .ntext{padding-left:24px}
+.node.d4 .ntext{padding-left:40px}
+.node .inf{color:#b06a12;font-size:11px}
+/* 판본 비교 — 이전 판본 대비 변경분 색칠 */
+.node.s-added{background:#f4fbf7}
+.node.s-removed{background:#fdf5f5}
+.node.s-changed{background:#fffdf4}
+ins.df-add{background:#d7f0e2;color:#0b5943;text-decoration:none;
+  padding:0 1px;border-radius:2px}
+del.df-del{background:#fadcdc;color:#932626;text-decoration:line-through;
+  padding:0 1px;border-radius:2px}
+.legend{display:inline-block;font-size:12px;margin-right:10px}
+.badge-chg{font-size:11px;background:#fdecec;color:#a32d2d;padding:1px 7px;
+  border-radius:9px;white-space:nowrap}
+.badge-same{font-size:11px;background:#f0f1f3;color:#70737a;padding:1px 7px;
+  border-radius:9px;white-space:nowrap}
+.vsel{font-size:12px}
+.muted{color:#8a8d94;font-size:12px}
+.hide{display:none}
+.pre{background:#fafbfc;border:1px solid #e3e5e9;border-radius:6px;padding:14px;
+  white-space:pre-wrap;font-size:13px;max-height:520px;overflow-y:auto;
+  font-family:'D2Coding',Consolas,monospace;line-height:1.7}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;
+  align-items:center;justify-content:center;padding:24px;z-index:50}
+.modal>div{background:#fff;border-radius:10px;max-width:860px;width:100%;
+  max-height:88vh;overflow-y:auto;padding:22px 26px}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:6px 14px;font-size:13px;margin-bottom:14px}
+.kv b{color:#5c5f66;font-weight:500}
+.warn{background:#fdf2f4;border-left:3px solid #9E1B32;padding:10px 14px;
+  color:#9E1B32;font-size:13px;margin-bottom:14px}
+.info{background:#eef2f9;border-left:3px solid #1F3864;padding:10px 14px;
+  color:#1F3864;font-size:13px;margin-bottom:14px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:720px){.grid2{grid-template-columns:1fr}.kv{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>AI 법·정책 동향 분석 플랫폼</h1>
+    <div class="sub">법제처 국가법령정보 OpenAPI 기반 · 개정 추적 및 영향 분석</div>
+  </div>
+  <div><span class="badge" id="auto-badge">상태 확인 중</span></div>
+</header>
+
+<nav>
+  <button class="on" data-tab="dash">현황</button>
+  <button data-tab="changes">개정사항</button>
+  <button data-tab="laws">법령 전문</button>
+  <button data-tab="watch">감시 법령</button>
+  <button data-tab="check">문서 검사</button>
+  <button data-tab="settings">설정</button>
+</nav>
+
+<main>
+  <section id="tab-dash">
+    <div class="cards" id="stat-cards"></div>
+    <div class="panel">
+      <h2>자동 적재 현황</h2>
+      <div class="info" id="auto-status">시스템이 자동으로 법령을 적재하고 개정을 확인합니다.</div>
+      <div class="muted" id="auto-detail"></div>
+      <div class="row" style="margin:14px 0 0">
+        <button class="b g" id="btn-check-now">지금 개정 확인</button>
+        <span class="muted" id="cn-msg">스케줄러를 기다리지 않고 판본 대조를 한 번 돌립니다.
+          감시 법령 전체를 훑으므로 수 분 걸립니다.</span>
+      </div>
+      <div class="pre hide" id="cn-log" style="margin-top:10px;max-height:260px"></div>
+    </div>
+    <div class="panel">
+      <h2>안내</h2>
+      <p style="font-size:13px;color:#5c5f66">
+        · 서버가 시작되면 감시 법령의 전문을 <b>자동으로 적재</b>합니다.<br>
+        · 매일 지정된 시각에 <b>개정 여부를 자동 확인</b>하고, 바뀐 법령만 최신 전문으로 갱신합니다.<br>
+        · 개정이 감지되면 <b>자동으로 영향을 분석</b>합니다.<br>
+        · 사용자는 <b>개정사항 조회</b>와 <b>리포트 다운로드</b>를 이용하시면 됩니다.
+      </p>
+    </div>
+  </section>
+
+  <section id="tab-changes" class="hide">
+    <div class="panel">
+      <div class="row">
+        <input id="ch-q" placeholder="법령명 검색" style="min-width:200px">
+        <label class="muted">시행일 기간</label>
+        <input id="ch-start" type="date">
+        <span class="muted">~</span>
+        <input id="ch-end" type="date">
+        <button class="b" id="btn-ch-search">조회</button>
+        <span class="muted" id="ch-count"></span>
+      </div>
+      <div class="row" style="margin-bottom:6px">
+        <span class="muted">다운로드:</span>
+        <button class="g" onclick="dl('html')">HTML</button>
+        <button class="g" onclick="dl('md')">마크다운</button>
+        <button class="g" onclick="dl('csv')">CSV (엑셀)</button>
+      </div>
+      <table>
+        <thead><tr><th style="width:90px">판정</th><th>법령명</th>
+          <th style="width:118px">분석 범위</th>
+          <th style="width:100px">공포일</th><th style="width:100px">시행일</th>
+          <th style="width:70px"></th></tr></thead>
+        <tbody id="ch-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-laws" class="hide">
+    <div class="panel">
+      <div class="row">
+        <input id="ft-q" placeholder="법령명·본문 검색" style="min-width:240px">
+        <button class="b" id="btn-ft-search">검색</button>
+        <span class="muted" id="ft-count"></span>
+      </div>
+      <table>
+        <thead><tr><th>법령명</th><th style="width:110px">소관부처</th>
+          <th style="width:100px">시행일</th><th style="width:110px">변경</th>
+          <th style="width:70px"></th></tr></thead>
+        <tbody id="ft-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-watch" class="hide">
+    <div class="panel">
+      <h2>감시 법령 추가</h2>
+      <div class="row">
+        <input id="wa-name" placeholder="법령명 (예: 긴급복지지원법)" style="min-width:240px">
+        <input id="wa-ministry" placeholder="소관부처 (선택)" style="min-width:130px">
+        <select id="wa-cat">
+          <option value="법령">법령</option>
+          <option value="행정규칙">행정규칙</option>
+          <option value="정보시스템 운영">정보시스템 운영</option>
+        </select>
+        <button class="b" id="btn-w-add">추가</button>
+        <span class="muted" id="wa-msg"></span>
+      </div>
+      <div class="muted">추가한 법령의 전문은 다음 판본 대조(매일 지정 시각) 또는 서버 재시작 때
+        수집됩니다. 아래 <b>상태</b> 표시는 서버 재시작 후에 갱신되므로, 전문이 이미 들어왔는데도
+        한동안 <b>미적재</b>로 보일 수 있습니다 — 실제 수집 여부는 <b>법령 전문</b> 탭에서 확인하세요.
+        검색이 안 되면 정식 명칭으로 고쳐 다시 추가하세요.</div>
+    </div>
+    <div class="panel">
+      <div class="row">
+        <input id="w-filter" placeholder="법령명 필터" style="min-width:200px">
+        <select id="w-fministry"><option value="">전체 부처</option></select>
+        <span class="muted" id="w-count"></span>
+      </div>
+      <table>
+        <thead><tr><th>법령명</th><th style="width:110px">소관부처</th>
+          <th style="width:80px">구분</th><th style="width:90px">상태</th>
+          <th style="width:150px">마지막 갱신</th>
+          <th style="width:64px">감시</th><th style="width:74px"></th></tr></thead>
+        <tbody id="w-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-check" class="hide">
+    <div class="panel">
+      <h2>문서 법령 저촉 검사</h2>
+      <div class="info">한글(hwp/hwpx)·PDF·워드 문서를 올리면 문서 안에 인용된 법령을
+        찾아 법제처 현행법과 대조합니다. 개명·폐지된 옛 법령명을 인용한 부분과,
+        인용한 <b>조가 개정되었는지</b>를 골라냅니다.
+        (AI를 쓰지 않습니다 — 정규식 + 법제처 조회)<br>
+        <span class="muted">판정 단위는 조(條)입니다. 항 단위 판정과 아직 시행 전인
+        개정은 잡히지 않습니다.</span></div>
+      <div class="row">
+        <input type="file" id="chk-file"
+               accept=".hwp,.hwpx,.pdf,.docx,.txt,.xlsx,.xlsm,.csv">
+        <label class="muted">기준일 <input type="date" id="chk-base"></label>
+        <button class="b" id="btn-check">검사</button>
+        <button class="b g" id="btn-tpl">양식 내려받기</button>
+        <span class="muted" id="chk-msg"></span>
+      </div>
+      <div class="info">문서를 그대로 올려도 되고, <b>양식(엑셀)에 법령·조를 적어</b>
+        올려도 됩니다. 양식을 쓰면 법령명을 추측하지 않으므로 누락이 없습니다 —
+        인용이 많거나 문서 서식이 복잡할 때 권합니다.</div>
+      <div class="info">기준일은 <b>문서를 작성한 시점</b>을 넣으세요. 그날 시행 중이던
+        법령과 현행을 대조해 그 사이 개정·신설·삭제된 조를 찾습니다.<br>
+        <b>날짜를 비우면 현행 바로 앞 판본과 대조합니다</b> — 가장 최근 시행된 개정만
+        보이므로, 오래된 문서라면 기준일을 넣어야 그 사이 변화가 전부 잡힙니다.</div>
+    </div>
+    <div class="panel hide" id="chk-result">
+      <div class="row" style="margin-bottom:12px">
+        <b id="chk-title" style="flex:1"></b>
+        <button class="b g" id="dl-md">마크다운 내려받기</button>
+        <button class="b g" id="dl-pdf">PDF 내려받기</button>
+      </div>
+      <div class="cards" id="chk-cards"></div>
+      <div id="chk-badrows"></div>
+      <h2>검토가 필요한 인용</h2>
+      <table>
+        <thead><tr><th style="width:88px">판정</th>
+          <th style="width:88px">조항</th><th>법령</th>
+          <th style="width:130px">조문</th><th style="width:150px">개정일</th>
+          <th>사유 / 현행</th></tr></thead>
+        <tbody id="chk-problems"></tbody>
+      </table>
+      <div id="chk-diffs"></div>
+      <h2 style="margin-top:18px">전체 인용</h2>
+      <table>
+        <thead><tr><th style="width:88px">판정</th>
+          <th style="width:88px">조항</th><th>법령</th>
+          <th style="width:130px">조문</th><th>문맥</th></tr></thead>
+        <tbody id="chk-all"></tbody>
+      </table>
+    </div>
+    <div class="panel">
+      <h2>최근 검사</h2>
+      <div class="info">검사 결과는 서버에 남습니다. 눌러서 다시 열거나 내려받을 수 있습니다.</div>
+      <table>
+        <thead><tr><th style="width:150px">검사 일시</th><th>문서</th>
+          <th style="width:80px">인용</th><th style="width:80px">개정됨</th>
+          <th style="width:90px">조항 없음</th><th style="width:90px"></th></tr></thead>
+        <tbody id="chk-history"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-settings" class="hide">
+    <div class="panel">
+      <h2>API 키 설정</h2>
+      <div class="info">여기서 입력한 값은 config.json에 저장되고 즉시 반영됩니다.
+        (법제처 키는 다음 적재부터, AI 설정은 바로 적용)</div>
+      <div class="warn">이 화면에는 인증이 없습니다. 127.0.0.1에서만 띄우세요.</div>
+
+      <div style="margin-bottom:16px">
+        <label class="muted">법제처 OpenAPI 키 (OC 아이디)</label>
+        <div class="row" style="margin-top:4px">
+          <input id="set-law-key" placeholder="비워두면 기존 키 유지" style="min-width:280px">
+          <span class="muted" id="set-law-cur"></span>
+        </div>
+      </div>
+      <div style="margin-bottom:16px">
+        <label class="muted">AI 사용</label>
+        <div class="row" style="margin-top:4px">
+          <select id="set-llm-enabled">
+            <option value="true">켜기 (AI 분석)</option>
+            <option value="false">끄기 (규칙 기반)</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-bottom:16px">
+        <label class="muted">AI API 키 (OpenAI 또는 Qwen 등)</label>
+        <div class="row" style="margin-top:4px">
+          <input id="set-llm-key" type="password"
+                 placeholder="sk-... (비워두면 기존 키 유지)" style="min-width:280px">
+          <span class="muted" id="set-llm-cur"></span>
+        </div>
+      </div>
+      <div style="margin-bottom:16px">
+        <label class="muted">AI 모델명</label>
+        <div class="row" style="margin-top:4px">
+          <input id="set-llm-model" placeholder="gpt-4o-mini" style="min-width:200px">
+        </div>
+      </div>
+      <div style="margin-bottom:16px">
+        <label class="muted">AI 서버 주소 (Qwen 등 OpenAI 호환 서버. 비우면 OpenAI)</label>
+        <div class="row" style="margin-top:4px">
+          <input id="set-llm-base" placeholder="(비워두면 OpenAI 사용)" style="min-width:280px">
+        </div>
+      </div>
+      <div style="margin-bottom:16px">
+        <label class="muted">매일 개정 확인 시각 (HH:MM)</label>
+        <div class="row" style="margin-top:4px">
+          <input id="set-daily" placeholder="22:00" style="min-width:110px">
+        </div>
+      </div>
+      <div class="row">
+        <button class="b" id="btn-set-save">저장</button>
+        <span class="muted" id="set-msg"></span>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>규칙 기반 결과를 AI로 다시 분석</h2>
+      <div class="muted" style="margin-bottom:10px">
+        AI 키를 나중에 넣은 경우, 그 전에 규칙 기반으로 분석된 개정 건은
+        그대로 남아 있습니다. 아래 버튼으로 AI 분석으로 교체합니다.
+        (건수만큼 API 비용이 듭니다)
+      </div>
+      <button class="b g" id="btn-reanalyze">AI로 다시 분석</button>
+    </div>
+  </section>
+</main>
+
+<div id="modal"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+const api = async (url, opt) => {
+  const r = await fetch(url, opt);
+  if (!r.ok) {
+    let m = r.statusText;
+    try { m = (await r.json()).detail || m; } catch (e) {}
+    throw new Error(m);
+  }
+  return r.json();
+};
+const esc = s => String(s==null?'':s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const LV = {RESTRICT:['제약 강화','t-restrict'], RELAX:['제약 완화','t-relax'],
+  NEUTRAL:['영향 없음','t-neutral'], CHECK:['확인 필요','t-check']};
+const lvTag = v => { const x = LV[v] || ['미분석','t-none'];
+  return `<span class="tag ${x[1]}">${x[0]}</span>`; };
+// 분석이 원문 전체를 봤는지 — 잘렸는데 모르고 믿는 일이 없도록 항상 노출한다
+const CV = {full:['전량 분석','t-full'], screened:['선별 분석','t-screened'],
+  partial:['일부만 분석','t-partial'], fallback:['비교 대상 없음','t-fallback']};
+const cvTag = (v, c, t) => {
+  if (!v) return '<span class="muted">-</span>';
+  const x = CV[v] || [v, 't-none'];
+  const n = (v === 'screened' && t) ? ` ${c}/${t}` : '';
+  return `<span class="tag ${x[1]}">${x[0]}${n}</span>`;
+};
+
+$$('nav button').forEach(b => b.onclick = () => {
+  $$('nav button').forEach(x => x.classList.remove('on'));
+  b.classList.add('on');
+  $$('main > section').forEach(s => s.classList.add('hide'));
+  $('#tab-' + b.dataset.tab).classList.remove('hide');
+  if (b.dataset.tab === 'changes') loadChanges();
+  if (b.dataset.tab === 'laws') loadFulltext();
+  if (b.dataset.tab === 'watch') loadWatch();
+  if (b.dataset.tab === 'check') loadChecks();
+  if (b.dataset.tab === 'settings') loadSettings();
+});
+
+async function loadStats() {
+  try {
+    const s = await api('/api/stats');
+    $('#stat-cards').innerHTML = [
+      ['감시 법령', s.watch_total], ['전문 적재', s.watch_loaded + ' / ' + s.watch_total],
+      ['감지된 개정', s.changes], ['분석 완료', s.analyzed],
+      ['90일 내 시행', s.upcoming_90d],
+    ].map(([l,n]) => `<div class="card"><div class="n">${n}</div>
+      <div class="l">${l}</div></div>`).join('');
+    const a = s.auto || {};
+    if (s.job_running) {
+      $('#auto-badge').textContent = '적재 진행 중';
+      $('#auto-status').textContent = '지금 자동 적재/개정 확인이 진행되고 있습니다.';
+    } else {
+      $('#auto-badge').textContent = '대기 중';
+      $('#auto-status').textContent = '자동 적재가 완료되었습니다. 다음 개정 확인을 기다립니다.';
+    }
+    const probs = (s.watch_notfound || 0) + (s.watch_empty || 0);
+    let d = [];
+    if (a.last_init) d.push('최근 초기적재: ' + a.last_init.replace('T',' '));
+    if (a.last_daily) d.push('최근 개정확인: ' + a.last_daily.replace('T',' '));
+    if (a.next_daily) d.push('다음 개정확인: ' + a.next_daily);
+    if (probs > 0) d.push(`확인필요 ${probs}건 (검색안됨 ${s.watch_notfound||0}/본문없음 ${s.watch_empty||0})`);
+    $('#auto-detail').innerHTML = d.map(esc).join(' · ');
+  } catch (e) { $('#auto-badge').textContent = '연결 오류'; }
+}
+
+async function loadChanges() {
+  const p = new URLSearchParams({q: $('#ch-q').value,
+    start: ($('#ch-start').value||'').replace(/-/g,''),
+    end: ($('#ch-end').value||'').replace(/-/g,''), limit: 200});
+  const r = await api('/api/changes?' + p);
+  $('#ch-count').textContent = `${r.total}건 (시행일 기준)`;
+  $('#ch-body').innerHTML = r.items.map(c => {
+    const nodes = c.diff_node_count
+      ? `<span class="muted"> 조문 ${c.diff_node_count}</span>` : '';
+    return `<tr>
+    <td>${lvTag(c.impact_level)}</td>
+    <td>${esc(c.title)}${c.trigger_type === 'pending'
+      ? ' <span class="tag t-check">분리시행</span>' : ''}</td>
+    <td>${cvTag(c.coverage)}${nodes}</td>
+    <td class="muted">${esc(c.announced_date||'-')}</td>
+    <td class="muted">${esc(c.enacted_date||'-')}</td>
+    <td><button class="b" style="padding:4px 10px;font-size:12px"
+      onclick="openChange('${esc(c.mst)}')">보기</button></td></tr>`;
+  }).join('')
+    || '<tr><td colspan="6" class="muted">해당 기간에 개정된 법령이 없습니다.</td></tr>';
+}
+$('#btn-ch-search').onclick = loadChanges;
+
+async function openChange(mst) {
+  const d = await api('/api/changes/' + mst);
+  const a = d.analysis;
+  const diffs = a && a.clause_diffs && a.clause_diffs.length
+    ? '<table><thead><tr><th>조문</th><th>변경</th><th>개정 전</th><th>개정 후</th></tr></thead><tbody>'
+      + a.clause_diffs.map(x => `<tr><td>${esc(x['조문']||x.article||'')}</td>
+        <td>${esc(x.change_type||'')}</td><td>${esc(x.before||'')}</td>
+        <td>${esc(x.after||'')}</td></tr>`).join('') + '</tbody></table>'
+    : '';
+  const acts = a && a.action_required && a.action_required.length
+    ? '<ul style="margin:6px 0 0 18px">' + a.action_required.map(x=>`<li>${esc(x)}</li>`).join('') + '</ul>'
+    : '';
+  $('#modal').innerHTML = `<div class="modal" onclick="if(event.target===this)closeM()">
+    <div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h2 style="color:#1F3864">${esc(d.title)}</h2>
+        <button class="b g" onclick="closeM()">닫기</button>
+      </div>
+      <div class="kv">
+        <b>판정</b><div>${a?lvTag(a.impact_level):'<span class="muted">미분석</span>'}</div>
+        <b>제개정</b><div>${esc(d.revision_type||'-')}</div>
+        <b>공포일</b><div>${esc(d.announced_date||'-')}</div>
+        <b>시행일</b><div>${esc(d.enacted_date||'-')}</div>
+        <b>분석 범위</b><div>${a?cvTag(a.coverage,a.covered_cnt,a.total_cnt):'-'}
+          ${a&&a.coverage_note?`<div class="muted">${esc(a.coverage_note)}</div>`:''}</div>
+        <b>판본</b><div class="muted">${esc(d.old_version_key||'(없음)')} →
+          ${esc(d.new_version_key||'-')}</div>
+      </div>
+      ${d.is_fallback ? '<div class="warn">비교할 이전 판본이 없어 전문을 그대로 분석했습니다. '
+        + '조문 특정 정확도가 낮으니 원문을 함께 확인하세요.</div>' : ''}
+      ${a ? `
+        <div class="kv">
+          <b>변경 요약</b><div>${esc(a.changed_summary||'')}</div>
+          <b>실무 영향</b><div>${esc(a.practical_effect||'')}</div>
+          <b>복지행정</b><div>${esc(a.welfare_admin_impact||'')}</div>
+          <b>적용 시점</b><div>${esc(a.effective_from||'')}</div>
+          <b>신뢰도</b><div>${esc(a.confidence||'')}</div>
+        </div>
+        ${acts?'<b style="font-size:13px;color:#5c5f66">조치 사항</b>'+acts:''}
+        ${diffs?'<div style="margin-top:14px">'+diffs+'</div>':''}
+      ` : '<div class="warn">아직 분석되지 않았습니다. 자동 분석을 기다려 주세요.</div>'}
+      <div style="margin-top:16px">
+        <b style="font-size:13px;color:#5c5f66">개정 전/후 조문</b>
+        <div class="grid2" style="margin-top:6px">
+          <div class="pre">${esc(d.old_articles||'(없음)')}</div>
+          <div class="pre">${esc(d.new_articles||'(없음)')}</div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px;margin-bottom:0">
+        <span class="muted">이 건만 내려받기:</span>
+        <button class="g" onclick="dlOne('${esc(d.mst)}','html')">HTML</button>
+        <button class="g" onclick="dlOne('${esc(d.mst)}','md')">마크다운</button>
+        <button class="g" onclick="dlOne('${esc(d.mst)}','csv')">CSV</button>
+      </div>
+      <div style="margin-top:14px">
+        <a href="${esc(d.law_url||'#')}" target="_blank">국가법령정보센터에서 원문 보기 →</a>
+      </div>
+    </div></div>`;
+}
+const closeM = () => $('#modal').innerHTML = '';
+
+function dl(fmt) {
+  const p = new URLSearchParams({
+    start: ($('#ch-start').value||'').replace(/-/g,''),
+    end: ($('#ch-end').value||'').replace(/-/g,'')});
+  window.open('/api/report/' + fmt + '?' + p, '_blank');
+}
+
+function dlOne(mst, fmt) {
+  window.open('/api/report-one/' + encodeURIComponent(mst) + '/' + fmt, '_blank');
+}
+
+// 전문을 열어보지 않고도 목록에서 바뀐 게 있는지 알 수 있게 한다.
+// 판본이 하나뿐이면 비교 대상이 없다는 뜻이므로 배지를 달지 않는다.
+function chgBadge(f) {
+  if (f.diff_nodes > 0)
+    return `<span class="badge-chg">변경 ${f.diff_nodes}조항</span>`;
+  if ((f.versions || 0) >= 2) return '<span class="badge-same">변경 없음</span>';
+  return '<span class="muted">-</span>';
+}
+
+async function loadFulltext() {
+  const r = await api('/api/fulltext?' + new URLSearchParams(
+    {q: $('#ft-q').value, limit: 200}));
+  $('#ft-count').textContent = `${r.total}건`;
+  $('#ft-body').innerHTML = r.items.map(f => `<tr>
+    <td>${esc(f.title)}</td>
+    <td class="muted">${esc(f.ministry||'-')}</td>
+    <td class="muted">${esc(f.enacted_date||'-')}</td>
+    <td>${chgBadge(f)}</td>
+    <td><button class="b" style="padding:4px 10px;font-size:12px"
+      onclick="openLaw('${esc(f.law_id)}')">전문</button></td></tr>`).join('')
+    || '<tr><td colspan="5" class="muted">적재된 전문이 없습니다.</td></tr>';
+}
+$('#btn-ft-search').onclick = loadFulltext;
+
+// 조항호목 노드를 좌측 좌표 + 우측 본문으로 그린다
+function renderNodes(nodes) {
+  if (!nodes || !nodes.length) return '<div class="muted">조항 데이터가 없습니다.</div>';
+  return nodes.map(n => `<div class="node d${n.depth}">
+    <span class="cite">${esc(n.cite)}${n.inferred
+      ? '<span class="inf"> ※호 미상</span>' : ''}</span>
+    <span class="ntext">${esc(n.body)}</span></div>`).join('');
+}
+
+async function openLaw(id, vk) {
+  let d;
+  try {
+    d = await api('/api/articles/' + id + (vk ? '?version_key=' + encodeURIComponent(vk) : ''));
+  } catch (e) {
+    // 조항호목이 없는 법령(구버전 적재분 등)은 기존 텍스트 전문으로 떨어진다
+    const f = await api('/api/fulltext/' + id);
+    $('#modal').innerHTML = `<div class="modal" onclick="if(event.target===this)closeM()">
+      <div><div style="display:flex;justify-content:space-between;margin-bottom:14px">
+        <h2 style="color:#1F3864">${esc(f.title)}</h2>
+        <button class="b g" onclick="closeM()">닫기</button></div>
+      <div class="warn">조항호목으로 구조화되지 않은 법령입니다. 원문 텍스트로 표시합니다.</div>
+      <div class="pre">${esc(f.content||'(본문 없음)')}</div></div></div>`;
+    return;
+  }
+  const v = d.version || {};
+  const opts = (d.versions||[]).map(x =>
+    `<option value="${esc(x.version_key)}"${x.version_key===v.version_key?' selected':''}
+      >시행 ${esc(x.enforce_date||'-')} · 공포 ${esc(x.announced_date||'-')}
+       (${x.node_count}조항)</option>`).join('');
+  const ad = d.addenda || {};
+  $('#modal').innerHTML = `<div class="modal" onclick="if(event.target===this)closeM()">
+    <div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h2 style="color:#1F3864">${esc(v.title || '')}</h2>
+        <div class="row" style="margin-bottom:0">
+          <button class="b g" onclick="showDiff('${esc(d.law_id)}','${esc(v.version_key||'')}')"
+            >판본 비교</button>
+          <button class="b g" onclick="recollect('${esc(d.law_id)}','${esc(v.title||'')}')"
+            >다시 수집</button>
+          <button class="b g" onclick="closeM()">닫기</button>
+        </div>
+      </div>
+      <div class="kv">
+        <b>판본</b><div>
+          <select class="vsel" id="v-sel" onchange="openLaw('${esc(d.law_id)}',this.value)">
+            ${opts}</select>
+          <span class="muted"> ${(d.versions||[]).length}개 판본</span></div>
+        <b>공포 / 시행</b><div>${esc(v.announced_date||'-')} / ${esc(v.enforce_date_d||'-')}</div>
+        <b>구조화</b><div>${esc(v.parse_status||'-')} · ${d.nodes.length}조항</div>
+        ${v.split_enforce_raw ? `<b>분리시행</b><div class="muted">${esc(v.split_enforce_raw)}</div>` : ''}
+      </div>
+      ${ad.body ? `<div style="margin-bottom:12px">
+        <b style="font-size:13px;color:#5c5f66">부칙 (이 판본)</b>
+        ${ad.source_law ? `<div class="warn" style="margin:6px 0">이 부칙은
+          「${esc(ad.source_law)}」의 부칙입니다. 본문의 조문번호는 그 법 기준입니다.</div>` : ''}
+        <div class="pre" style="max-height:180px">${esc(ad.body)}</div></div>` : ''}
+      <b style="font-size:13px;color:#5c5f66">조문</b>
+      <div style="max-height:56vh;overflow-y:auto;margin-top:6px;border:1px solid #e3e5e9;
+        border-radius:6px;padding:10px 14px">${renderNodes(d.nodes)}</div>
+    </div></div>`;
+}
+
+// ── 판본 비교 (이전 판본 대비 변경분 색칠) ──
+async function showDiff(id, vk) {
+  const d = await api('/api/versions/' + id + '/diff' +
+    (vk ? '?new=' + encodeURIComponent(vk) : ''));
+  const c = d.counts || {};
+  // n.html은 서버에서 이미 이스케이프한 뒤 ins/del만 씌운 것이라 그대로 넣는다
+  const nodes = (d.nodes || []).map(n => `<div class="node d${n.depth} s-${n.status}">
+    <span class="cite">${esc(n.cite)}</span>
+    <span class="ntext">${n.html}</span></div>`).join('')
+    || '<div class="muted">조항 데이터가 없습니다.</div>';
+  const head = d.old
+    ? `<div class="kv">
+         <b>비교 대상</b><div>시행 ${esc(d.old.enforce_date||'-')}
+           (공포 ${esc(d.old.announced_date||'-')}) →
+           <b>시행 ${esc(d.new.enforce_date||'-')}
+           (공포 ${esc(d.new.announced_date||'-')})</b></div>
+         <b>변경 요약</b><div>추가 ${c.added||0} · 삭제 ${c.removed||0} ·
+           변경 ${c.changed||0} · 그대로 ${c.same||0} (조항 기준)</div>
+       </div>`
+    : `<div class="info">이 법령은 판본이 하나뿐입니다(처음 수집분).
+         비교할 이전 판본이 없어 전문을 그대로 보여줍니다.
+         앞으로 개정이 감지될 때마다 판본이 쌓이면서 변경분이 표시됩니다.</div>`;
+  $('#modal').innerHTML = `<div class="modal" onclick="if(event.target===this)closeM()">
+    <div style="max-width:1000px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h2 style="color:#1F3864">판본 비교</h2>
+        <button class="b g" onclick="closeM()">닫기</button>
+      </div>
+      ${head}
+      ${d.coord_collision ? '<div class="warn">항·호 번호를 파싱하지 못한 조문이 있어 '
+        + '<b>왼쪽 조문 표기가 뭉뚱그려져</b> 보일 수 있습니다 (예: 제2조제17항 → 제2조). '
+        + '변경 내용 자체는 순서대로 대조한 결과입니다.</div>' : ''}
+      <div style="margin-bottom:8px">
+        <span class="legend"><ins class="df-add">추가된 내용</ins></span>
+        <span class="legend"><del class="df-del">삭제된 내용</del></span>
+      </div>
+      <div style="max-height:60vh;overflow-y:auto;border:1px solid #e3e5e9;
+        border-radius:6px;padding:10px 14px">${nodes}</div>
+    </div></div>`;
+}
+
+// 지금 있는 전문을 버리고 법제처에서 새로 받게 만든다.
+// 파싱이 깨졌거나(본문없음) 파서를 고친 뒤 다시 파싱할 때 쓰는 경로다.
+async function recollect(id, title) {
+  if (!confirm(`'${title}' 의 전문을 버리고 법제처에서 다시 받을까요?\n\n`
+    + '· 지금 저장된 전문·판본·조항·부칙이 지워지고 상태가 "미적재"가 됩니다.\n'
+    + '· 다음 개정 확인(또는 서버 재시작) 때 자동으로 새로 받아옵니다.\n'
+    + '  「현황」 탭의 "지금 개정 확인"을 누르면 바로 받아올 수 있습니다.\n'
+    + '· 개정 이력과 AI 분석 결과는 지워지지 않습니다.\n\n'
+    + '받아오기 전까지는 이 법령의 전문을 볼 수 없습니다.')) return;
+  try {
+    await api('/api/fulltext/' + encodeURIComponent(id), {method:'DELETE'});
+    closeM(); loadFulltext(); loadStats();
+  } catch (e) { alert(e.message); }
+}
+
+// ── 문서 검사 ──
+const CHK_TAG = {OK:['정상','t-relax'], RENAMED:['개명 의심','t-check'],
+  NOTFOUND:['확인 필요','t-restrict'], SKIP:['대조 제외','t-none']};
+const chkTag = v => { const x = CHK_TAG[v] || ['-','t-none'];
+  return `<span class="tag ${x[1]}">${x[0]}</span>`; };
+
+// 조 단위 축. 법령명 축(CHK_TAG)과 섞지 않는다 — 성격이 다르다.
+const ART_TAG = {'개정됨':['개정됨','t-check'], '변경 없음':['변경 없음','t-relax'],
+  '조항 없음':['조항 없음','t-restrict'], '확인 불가':['확인 불가','t-none'],
+  '신설':['신설','t-check'], '삭제':['삭제','t-restrict'],
+  '대조 안 함':['–','t-none']};
+const artTag = v => { const x = ART_TAG[v] || ['-','t-none'];
+  return `<span class="tag ${x[1]}">${x[0]}</span>`; };
+
+$('#btn-check').onclick = async () => {
+  const f = $('#chk-file').files[0];
+  if (!f) { $('#chk-msg').textContent = '파일을 선택하세요'; return; }
+  $('#chk-msg').textContent =
+    '파일을 읽는 중…';
+  $('#btn-check').disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append('file', f);
+    fd.append('base_date', $('#chk-base').value || '');
+    // 서버는 검사ID만 즉시 돌려주고 조회는 뒤에서 돈다. 인용이 많으면
+    // 분 단위라 응답을 붙들고 있으면 브라우저가 먼저 끊는다.
+    const started = await api('/api/check-document', {method:'POST', body: fd});
+    loadChecks();
+    await pollCheck(started.검사ID, started.인용수 || 0);
+  } catch (e) { $('#chk-msg').textContent = '실패: ' + e.message; }
+  $('#btn-check').disabled = false;
+};
+
+async function pollCheck(cid, total) {
+  const bar = n => '█'.repeat(n) + '░'.repeat(20 - n);
+  for (;;) {
+    await new Promise(r => setTimeout(r, 1200));
+    let d;
+    try { d = await api('/api/checks/' + cid); }
+    catch (e) { $('#chk-msg').textContent = '조회 실패: ' + e.message; return; }
+    if (d.상태 === '진행중') {
+      const p = d.진행 || {};
+      const t = p.total || total || 0;
+      const pct = t ? Math.round(p.done / t * 100) : 0;
+      $('#chk-msg').innerHTML =
+        `검사 중 ${bar(Math.round(pct / 5))} ${p.done||0}/${t} (${pct}%)`;
+      continue;
+    }
+    if (d.상태 === '실패') {
+      $('#chk-msg').textContent = '실패: ' + (d.오류 || '알 수 없는 오류');
+      loadChecks(); return;
+    }
+    renderCheck(d);
+    loadChecks();
+    $('#chk-msg').textContent = `완료 — ${d.파일명} (` +
+      (d.입력==='양식' ? `양식 ${d.행수||0}행` : `${d.글자수||0}자`) + ')';
+    return;
+  }
+}
+
+$('#btn-tpl').onclick = () => { location.href = '/api/check-template'; };
+
+// ── 최근 검사 (서버에 저장된 결과) ──
+async function loadChecks() {
+  let items = [];
+  try { items = (await api('/api/checks')).items || []; } catch (e) {}
+  $('#chk-history').innerHTML = items.map(it => {
+    const s = it.요약 || {};
+    // 진행 중·실패 건은 요약이 없다. 상태만 보여주고 열기는 막는다.
+    if (it.상태 && it.상태 !== '완료') {
+      const p = it.진행 || {};
+      const note = it.상태 === '실패' ? esc(it.오류 || '실패')
+                 : `진행 중 ${p.done||0}/${p.total||0}`;
+      return `<tr><td class="muted">—</td><td>${esc(it.파일명)}</td>
+        <td colspan="3" class="muted">${note}</td><td></td></tr>`;
+    }
+    return `<tr>
+      <td class="muted">${esc(it.검사일시)}</td>
+      <td>${esc(it.파일명)}</td>
+      <td class="muted">${s.총_인용||0}</td>
+      <td>${s.개정됨 ? `<span class="tag t-check">${s.개정됨}</span>` : '<span class="muted">0</span>'}</td>
+      <td>${s.조항없음 ? `<span class="tag t-restrict">${s.조항없음}</span>` : '<span class="muted">0</span>'}</td>
+      <td><button class="b" style="padding:4px 10px;font-size:12px"
+        onclick="openCheck('${esc(it.검사ID)}')">열기</button></td>
+      </tr>`;
+  }).join('') || '<tr><td colspan="6" class="muted">저장된 검사가 없습니다.</td></tr>';
+}
+
+// 개정 시점 칸. 기준일 검사에서는 '구간 + 개정 횟수'가 답이다 — 판본 하나를
+// 못박으면 그 개정에서 바뀐 것처럼 읽히는데, 거기까진 확인하지 않았다.
+function whenCell(c) {
+  if (c.개정내역) {
+    const n = c.개정내역.length;
+    if (!n) return esc(c.기준판본시행일||'-') + ' 이후<br>개정 없음';
+    return `${esc(c.기준판본시행일||'-')} 이후<br>개정 ${n}회`;
+  }
+  return c.시행일 ? '시행 ' + esc(c.시행일) + '<br>공포 ' + esc(c.공포일) : '-';
+}
+
+// 양식에서 읽지 못한 줄. 조용히 빠지면 검사됐다고 믿게 되므로 맨 위에 둔다.
+function renderBadRows(d) {
+  const bad = d.양식오류 || [];
+  $('#chk-badrows').innerHTML = !bad.length ? '' : `
+    <h2>양식 오류 — 검사되지 않은 줄 ${bad.length}건</h2>
+    <table><thead><tr><th style="width:70px">행</th><th style="width:320px">사유</th>
+      <th>입력 내용</th></tr></thead><tbody>` +
+    bad.map(e => `<tr><td class="muted">${esc(e.행)}</td>
+      <td>${esc(e.사유)}</td><td class="muted">${esc(e.원문)}</td></tr>`).join('') +
+    '</tbody></table>';
+}
+
+// 바뀐 조문의 전후 대비. 기준일을 넣었을 때만 채워진다.
+function renderDiffs(d) {
+  const items = (d.문제||[]).filter(c =>
+    ['개정됨','신설','삭제'].includes(c.조항판정) && (c.구조문 || c.현조문));
+  const box = $('#chk-diffs');
+  box.innerHTML = !items.length ? '' : '<h2>바뀐 조문 — 기준일 대비</h2>' +
+    items.map(c => `
+      <details style="margin:8px 0;border:1px solid #e3e6ec;border-radius:6px;padding:8px 12px">
+        <summary style="cursor:pointer">
+          <b>${esc(c.법령)} ${esc(c.조문)}</b> ${artTag(c.조항판정)}
+          ${(c.개정내역||[]).length ? `<span class="muted"> · 그 사이 개정 ${c.개정내역.length}회</span>` : ''}
+        </summary>
+        ${(c.개정내역||[]).length ? `<div class="muted" style="font-size:12px;margin:6px 0">
+          ${c.개정내역.map(h => `${esc(h.시행일)} 시행(${esc(h.구분)})`).join(' · ')}</div>` : ''}
+        ${c.구조문 ? `<div style="margin-top:6px"><b class="muted">기준일 시점 ${esc(c.기준판본시행일||'')}</b>
+          <pre style="white-space:pre-wrap;background:#f7f8fa;padding:8px;border-radius:4px;font-size:12px">${esc(c.구조문)}</pre></div>` : ''}
+        ${c.현조문 ? `<div><b class="muted">현행 ${esc(c.현행시행일||'')}</b>
+          <pre style="white-space:pre-wrap;background:#f2f7f2;padding:8px;border-radius:4px;font-size:12px">${esc(c.현조문)}</pre></div>` : ''}
+      </details>`).join('');
+}
+
+async function openCheck(cid) {
+  try {
+    renderCheck(await api('/api/checks/' + cid));
+    $('#chk-msg').textContent = '';
+    $('#chk-result').scrollIntoView({block: 'start'});
+  } catch (e) { $('#chk-msg').textContent = '불러오기 실패: ' + e.message; }
+}
+
+function renderCheck(d) {
+  $('#chk-result').classList.remove('hide');
+  // 저장된 결과라야 내려받을 수 있다 — 검사ID가 곧 서버에 남은 파일이다.
+  $('#chk-title').textContent =
+    `${d.파일명 || ''}${d.검사일시 ? ' · ' + d.검사일시 : ''}`;
+  for (const fmt of ['md', 'pdf']) {
+    const b = $('#dl-' + fmt);
+    b.disabled = !d.검사ID;
+    b.onclick = () => { location.href = `/api/checks/${d.검사ID}/download/${fmt}`; };
+  }
+  const s = d.요약 || {};
+  $('#chk-cards').innerHTML = [
+    ['총 인용', s.총_인용||0], ['정상', s.정상||0], ['개명 의심', s.개명의심||0],
+    ['확인 필요', s.확인필요||0], ['대조 제외', s.대조제외||0],
+    ['개정됨', s.개정됨||0], ['신설', s.신설||0], ['삭제', s.삭제||0],
+    ['조항 없음', s.조항없음||0],
+  ].map(([l,n]) => `<div class="card"><div class="n">${n}</div>
+    <div class="l">${l}</div></div>`).join('');
+  $('#chk-problems').innerHTML = (d.문제||[]).map(c => `<tr>
+    <td>${chkTag(c.판정)}</td><td>${artTag(c.조항판정)}</td>
+    <td>${esc(c.법령)}</td><td class="muted">${esc(c.조문)}</td>
+    <td class="muted">${whenCell(c)}</td>
+    <td class="muted">${esc(c.사유||'')}${c.현행 ? ' → ' + esc(c.현행) : ''}
+      ${['조항 없음','신설','삭제'].includes(c.조항판정)
+        ? '<br>' + esc(c.조항사유||'') : ''}</td>
+    </tr>`).join('')
+    || '<tr><td colspan="6" class="muted">검토가 필요한 인용이 없습니다.</td></tr>';
+  renderBadRows(d);
+  renderDiffs(d);
+  $('#chk-all').innerHTML = (d.인용||[]).map(c => `<tr>
+    <td>${chkTag(c.판정)}</td><td>${artTag(c.조항판정)}</td>
+    <td>${esc(c.법령)}</td><td class="muted">${esc(c.조문)}</td>
+    <td class="muted" style="font-size:12px">…${esc((c.문맥||'').slice(0,70))}…</td>
+    </tr>`).join('')
+    || '<tr><td colspan="5" class="muted">인용된 법령이 없습니다.</td></tr>';
+}
+
+// ── 감시 법령 ──
+let WATCH = [];
+const STATUS_TAG = {loaded:['적재됨','t-relax'], pending:['미적재','t-check'],
+  notfound:['검색안됨','t-restrict'], empty:['본문없음','t-check']};
+async function loadWatch() {
+  WATCH = await api('/api/watchlist');
+  const mins = [...new Set(WATCH.map(w => w.ministry).filter(Boolean))];
+  $('#w-fministry').innerHTML = '<option value="">전체 부처</option>' +
+    mins.map(m => `<option>${esc(m)}</option>`).join('');
+  renderWatch();
+}
+function renderWatch() {
+  const q = ($('#w-filter').value || '').trim();
+  const fm = $('#w-fministry').value;
+  const rows = WATCH.filter(w =>
+    (!q || w.name.includes(q)) && (!fm || w.ministry === fm));
+  $('#w-count').textContent = `${rows.length} / ${WATCH.length}건`;
+  $('#w-count').textContent += ` · 중지 ${WATCH.filter(w => !w.enabled).length}건`;
+  $('#w-body').innerHTML = rows.map(w => {
+    const st = STATUS_TAG[w.status] || ['-','t-none'];
+    // 중지된 행은 흐리게 — 목록에 남아 있지만 감시하지 않는다는 걸 눈으로 구분
+    return `<tr${w.enabled ? '' : ' style="opacity:.5"'}>
+    <td>${esc(w.name)}</td>
+    <td class="muted">${esc(w.ministry)}</td>
+    <td class="muted">${esc(w.category)}</td>
+    <td><span class="tag ${st[1]}">${st[0]}</span></td>
+    <td class="muted">${esc(w.last_updated ? w.last_updated.slice(0,16).replace('T',' ') : '-')}</td>
+    <td><button class="b g" style="padding:3px 9px;font-size:12px;white-space:nowrap"
+      title="${w.enabled
+        ? '감시를 중지합니다. 지워지는 것은 없고 개정 확인 대상에서만 빠집니다'
+        : '감시를 재개합니다. 다음 개정 확인부터 다시 포함됩니다'}"
+      onclick="toggleWatch(${w.id},${!w.enabled})"
+      >${w.enabled ? '중지' : '재개'}</button></td>
+    <td><button class="b g" style="padding:3px 9px;font-size:12px;white-space:nowrap"
+      onclick="delWatch(${w.id},'${esc(w.name)}')">삭제</button></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="7" class="muted">해당 법령이 없습니다.</td></tr>';
+}
+
+// 감시 사용/중지 — 삭제하지 않고 수집·점검 대상에서만 빼 둔다.
+async function toggleWatch(id, enabled) {
+  try {
+    const r = await api('/api/watchlist/' + id + '/toggle', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({enabled})});
+    $('#wa-msg').textContent = enabled
+      ? `'${r.name}' 감시 재개 — 다음 개정 확인부터 포함됩니다`
+      : `'${r.name}' 감시 중지 — 전문과 개정 이력은 그대로 남습니다`;
+    setTimeout(() => $('#wa-msg').textContent = '', 4000);
+    loadWatch(); loadStats();
+  } catch (e) { alert(e.message); }
+}
+$('#w-filter').oninput = renderWatch;
+$('#w-fministry').onchange = renderWatch;
+
+$('#btn-w-add').onclick = async () => {
+  const name = $('#wa-name').value.trim();
+  if (!name) { $('#wa-msg').textContent = '법령명을 입력하세요'; return; }
+  try {
+    await api('/api/watchlist', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name, ministry: $('#wa-ministry').value.trim(),
+                            category: $('#wa-cat').value})});
+    $('#wa-name').value = ''; $('#wa-ministry').value = '';
+    $('#wa-msg').textContent = '추가됨';
+    loadWatch(); loadStats();
+    setTimeout(() => $('#wa-msg').textContent = '', 2000);
+  } catch (e) { $('#wa-msg').textContent = e.message; }
+};
+
+// 감시 법령 삭제 — 무엇이 지워지고 무엇이 남는지 숫자로 보여준 뒤 받는다.
+// confirm()으로는 체크박스를 못 넣어서 별도 모달을 쓴다.
+async function delWatch(id, name) {
+  let d;
+  try {
+    d = await api('/api/watchlist/' + id + '/data');
+  } catch (e) { alert(e.message); return; }
+  const s = d.data || {};
+  const has = (s.versions || 0) + (s.articles || 0) + (s.addenda || 0) > 0;
+  const keep = (s.changes || 0) + (s.analyses || 0) > 0;
+
+  $('#modal').innerHTML = `<div class="modal" onclick="if(event.target===this)closeM()">
+    <div style="max-width:620px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h2 style="color:#9E1B32">감시 법령 삭제</h2>
+        <button class="b g" onclick="closeM()">취소</button>
+      </div>
+      <div class="kv">
+        <b>법령명</b><div><b>${esc(name)}</b></div>
+        <b>상태</b><div>${esc(d.status)}</div>
+      </div>
+
+      <div class="warn">
+        <b>이 작업은 되돌릴 수 없습니다.</b><br>
+        삭제하면 이 법령은 <b>더 이상 개정 여부를 확인하지 않습니다.</b>
+        매일 도는 판본 대조 대상에서 빠지므로, 앞으로 이 법령이 개정돼도 알림·기록이 남지 않습니다.
+      </div>
+
+      ${has ? `
+      <div style="border:1px solid #e3e5e9;border-radius:6px;padding:12px 14px;margin-bottom:12px">
+        <label style="display:flex;gap:9px;align-items:flex-start;cursor:pointer">
+          <input type="checkbox" id="dw-purge" style="margin-top:3px;width:16px;height:16px">
+          <span>
+            <b>수집된 전문 데이터도 함께 삭제</b>
+            <div class="muted" style="margin-top:5px;line-height:1.7">
+              판본 ${s.versions}개 · 조문 ${s.articles.toLocaleString()}개 ·
+              부칙 ${s.addenda}건이 지워집니다.<br>
+              체크하지 않으면 <b>감시 목록에서만 빠지고 전문은 그대로 남아</b>
+              「법령 전문」 탭에 계속 보입니다. 갱신은 되지 않으므로 시간이 지나면
+              현행과 어긋난 옛 내용이 됩니다.
+            </div>
+          </span>
+        </label>
+      </div>` : '<div class="muted" style="margin-bottom:12px">수집된 전문이 없어 지울 데이터가 없습니다.</div>'}
+
+      ${keep ? `<div class="info">
+        <b>개정 이력 ${s.changes}건과 AI 분석 ${s.analyses}건은 지우지 않습니다.</b><br>
+        법제처에서 다시 받아올 수 없는 기록이고, 분석은 실제 비용이 들어간 결과라 보존합니다.
+        다만 감시 목록에 없는 법령의 이력으로 남아 「개정사항」 탭에 계속 표시됩니다.
+      </div>` : ''}
+
+      <div class="row" style="margin:16px 0 0;justify-content:flex-end">
+        <button class="b g" onclick="closeM()">취소</button>
+        <button class="b" style="background:#9E1B32"
+          onclick="doDelWatch(${id})">삭제</button>
+      </div>
+    </div></div>`;
+}
+
+async function doDelWatch(id) {
+  const box = $('#dw-purge');
+  const purge = !!(box && box.checked);
+  try {
+    const r = await api('/api/watchlist/' + id + '?purge=' + purge, {method:'DELETE'});
+    closeM();
+    const p = r.purged || {};
+    $('#wa-msg').textContent = purge && p.versions !== undefined
+      ? `'${r.name}' 삭제됨 — 판본 ${p.versions}·조문 ${p.articles} 함께 삭제`
+      : `'${r.name}' 삭제됨 (전문은 보존)`;
+    setTimeout(() => $('#wa-msg').textContent = '', 5000);
+    loadWatch(); loadFulltext(); loadStats();
+  } catch (e) { alert(e.message); }
+}
+
+// ── 설정 ──
+async function loadSettings() {
+  try {
+    const c = await api('/api/config');
+    $('#set-law-cur').textContent = c.law_api_key_set
+      ? `현재: ${c.law_api_key_masked}` : '아직 설정 안 됨';
+    $('#set-llm-cur').textContent = c.llm_key_set
+      ? `현재: ${c.llm_key_masked}` : '아직 설정 안 됨';
+    $('#set-llm-enabled').value = c.llm_enabled ? 'true' : 'false';
+    $('#set-llm-model').value = c.llm_model || '';
+    $('#set-llm-base').value = c.llm_base_url || '';
+    $('#set-daily').value = c.daily_time || '';
+    $('#set-law-key').value = '';
+    $('#set-llm-key').value = '';
+  } catch (e) { $('#set-msg').textContent = e.message; }
+}
+
+$('#btn-set-save').onclick = async () => {
+  const body = {
+    llm_enabled: $('#set-llm-enabled').value === 'true',
+    llm_model: $('#set-llm-model').value.trim(),
+    llm_base_url: $('#set-llm-base').value.trim(),
+    daily_time: $('#set-daily').value.trim(),
+  };
+  const lk = $('#set-law-key').value.trim();
+  const ak = $('#set-llm-key').value.trim();
+  if (lk) body.law_api_key = lk;
+  if (ak) body.llm_key = ak;
+  try {
+    const r = await api('/api/config', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    $('#set-msg').textContent = '저장됨' +
+      (r.llm_available ? ' · AI 사용 가능' : ' · AI 미사용(규칙 기반)');
+    loadSettings(); loadStats();
+    setTimeout(() => $('#set-msg').textContent = '', 3000);
+  } catch (e) { $('#set-msg').textContent = '실패: ' + e.message; }
+};
+
+$('#btn-reanalyze').onclick = async () => {
+  if (!confirm('규칙 기반으로 분석된 개정 건을 지금 AI로 다시 분석합니다.\n'
+    + '(AI 키가 설정돼 있어야 하며, 건수만큼 API 비용이 듭니다)')) return;
+  $('#btn-reanalyze').disabled = true;
+  $('#set-msg').textContent = 'AI로 다시 분석 중… (건수가 많으면 시간이 걸립니다)';
+  try {
+    const r = await api('/api/reanalyze', {method:'POST'});
+    $('#set-msg').textContent = r.message || `${r.reanalyzed}건 완료`;
+  } catch (e) { $('#set-msg').textContent = '실패: ' + e.message; }
+  $('#btn-reanalyze').disabled = false;
+};
+
+// ── 수동 개정 확인 ──
+// 서버가 백그라운드로 돌리므로, 요청은 바로 끝나고 진행 상황만 폴링한다.
+let CN_TIMER = null;
+
+async function pollJob() {
+  const j = await api('/api/collect/status');
+  $('#cn-log').classList.remove('hide');
+  $('#cn-log').textContent = (j.log || []).join('\n') || '시작하는 중…';
+  $('#cn-log').scrollTop = $('#cn-log').scrollHeight;
+  if (j.running) {
+    const n = j.total ? ` (${j.done}/${j.total})` : '';
+    $('#cn-msg').textContent = '실행 중… ' + (j.phase || '') + n;
+    return;
+  }
+  clearInterval(CN_TIMER); CN_TIMER = null;
+  $('#btn-check-now').disabled = false;
+  const r = j.result;
+  $('#cn-msg').textContent = r
+    ? `완료 — 대상 ${r.checked} · 개정 ${r.changed} · 변화없음 ${r.unchanged} · 실패 ${r.failed}`
+    : '완료';
+  loadStats();
+}
+
+$('#btn-check-now').onclick = async () => {
+  $('#btn-check-now').disabled = true;
+  $('#cn-msg').textContent = '시작하는 중…';
+  try {
+    await api('/api/check-now', {method:'POST'});
+  } catch (e) {
+    $('#cn-msg').textContent = '실패: ' + e.message;
+    $('#btn-check-now').disabled = false;
+    return;
+  }
+  if (CN_TIMER) clearInterval(CN_TIMER);
+  CN_TIMER = setInterval(pollJob, 2000);
+  pollJob();
+};
+
+loadStats();
+setInterval(loadStats, 5000);
+</script>
+</body>
+</html>

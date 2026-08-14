@@ -1,0 +1,997 @@
+"""
+app.py — FastAPI 웹 서버 (MySQL 전용 · 자동 적재)
+================================================================================
+적재·분석은 서버가 알아서 한다. 사용자는 조회·다운로드가 주 용도다.
+  · 서버 시작 시  : 미적재 법령 자동 초기적재   (config.auto.init_on_startup)
+  · 매일 지정시각 : 개정 확인 → 변경분 전문 갱신 → 감지분 자동 분석
+                                                 (config.auto.daily_check)
+
+실행:  python app.py           → http://127.0.0.1:8000
+      uvicorn app:api --reload --port 8000   (개발 시 자동 리로드)
+API 문서:  http://127.0.0.1:8000/docs
+
+수동 적재·메일 발송 기능은 없다. 감시 법령 추가·삭제, 전문 삭제, 키 설정,
+문서 저촉 검사는 화면에서 할 수 있다(v12에서 이관).
+
+주의: 설정 API(/api/config)에는 인증이 없다. 127.0.0.1 바인딩을 전제로 한
+      시연용 화면이므로, 외부에 노출하려면 앞단에 인증을 두어야 한다.
+================================================================================
+"""
+import os
+import re
+import json
+import uuid
+import asyncio
+import tempfile
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from typing import List, Dict, Any
+from urllib.parse import quote
+
+from fastapi import (FastAPI, HTTPException, Query, Body, File, Form,
+                     UploadFile)
+from fastapi.responses import HTMLResponse, Response, FileResponse
+
+import analyzer
+import checker
+import report
+import sheet
+from core import (Store, LawCollector, LLMClient, LawChange,
+                  load_config, save_config, logger, BASE_DIR, OUTPUT_DIR,
+                  latest_addenda, report_md, report_csv, report_html,
+                  diff_versions, run_check as core_run_check)
+from law_parser import node_from_row
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # ── 기동 ──
+    STATE["cfg"] = load_config()
+    STATE["store"] = Store(STATE["cfg"])
+    await STATE["store"].connect()
+    STATE["llm"] = LLMClient(STATE["cfg"]["llm"])
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info("서버 준비 완료 → http://127.0.0.1:8000")
+
+    auto = STATE["cfg"].get("auto", {})
+    if auto.get("init_on_startup", True):
+        STATE["auto_task"] = asyncio.create_task(_auto_init_then_schedule())
+    elif auto.get("daily_check", True):
+        STATE["auto_task"] = asyncio.create_task(_daily_scheduler_loop())
+    yield
+    # ── 종료 ──
+    STATE["stopping"] = True
+    for key in ("auto_task", "manual_task", "check_task"):
+        task = STATE.get(key)
+        if task:
+            task.cancel()
+    if STATE["llm"]:
+        await STATE["llm"].close()
+    if STATE["store"]:
+        await STATE["store"].close()
+
+
+api = FastAPI(title="AI 법·정책 동향 분석 플랫폼", version="1.0",
+              description="법제처 OpenAPI 기반 법령 조회 · 개정 추적 · 영향 분석",
+              lifespan=lifespan)
+
+STATE: Dict[str, Any] = {
+    "cfg": None, "store": None, "llm": None, "stopping": False,
+    "job": {"running": False, "phase": "", "done": 0, "total": 0,
+            "log": [], "result": None, "kind": ""},
+    "auto": {"last_init": "", "last_daily": "", "next_daily": ""},
+    # 문서 검사는 적재·분석용 job 락과 따로 둔다. DB를 쓰지 않고 법제처만
+    # 두드리는 작업이라, 매일 도는 적재 때문에 사용자 검사가 막히면 안 된다.
+    "checks": {},           # 검사ID → 진행 상태 (완료분은 파일이 정본)
+    "check_running": False,
+    "check_task": None,
+}
+
+
+def cfg() -> Dict:
+    return STATE["cfg"]
+
+
+def store() -> Store:
+    return STATE["store"]
+
+
+# ============================================================
+# 백그라운드 작업 — 적재 (사용자가 트리거하지 않음)
+# ============================================================
+def _job_log(msg: str):
+    j = STATE["job"]
+    j["log"].append(f"{datetime.now():%H:%M:%S} {msg}")
+    j["log"] = j["log"][-200:]
+    logger.info(msg)
+
+
+def _try_acquire_job() -> bool:
+    """작업 시작 권한을 원자적으로 획득. 이미 실행 중이면 False."""
+    if STATE["job"]["running"]:
+        return False
+    STATE["job"]["running"] = True
+    return True
+
+
+def _validate_hhmm(t: str) -> str:
+    try:
+        hh, mm = [int(x) for x in str(t).split(":")]
+        if 0 <= hh <= 23 and 0 <= mm <= 59:
+            return f"{hh:02d}:{mm:02d}"
+    except (ValueError, AttributeError):
+        pass
+    return "08:00"
+
+
+async def _run_init_load():
+    """초기 적재 — 감시 법령 전문을 DB에 저장 (미적재분만, 이어받기 가능)."""
+    j = STATE["job"]
+    j.update({"phase": "준비", "done": 0, "total": 0,
+              "log": [], "result": None, "kind": "init"})
+    col = None
+    try:
+        key = cfg().get("law_api_key")
+        if not key:
+            _job_log("법제처 API 키가 없습니다 (config.json의 law_api_key).")
+            return
+        col = LawCollector(key)
+        watch = await store().list_watch(only_enabled=True)
+        todo = [w for w in watch if w.get("status") != "loaded"]
+        j["total"] = len(todo)
+        _job_log(f"[자동] 초기 적재 시작 — 대상 {len(todo)}건 "
+                 f"(전체 {len(watch)}건 중 미적재분)")
+        n_full = 0
+        for w in todo:
+            name = w["name"]
+            j["phase"] = f"전문 적재 · {name[:22]}"
+            try:
+                fts = await col.collect_fulltext(name, w.get("category", ""))
+                for f in fts:
+                    await store().upsert_fulltext(f)
+                if fts:
+                    has_body = any(len(f.content or "") > 30 for f in fts)
+                    await store().update_watch_status(
+                        w["id"], law_id=fts[0].law_id,
+                        status="loaded" if has_body else "empty",
+                        last_updated=datetime.now().isoformat(timespec="seconds"))
+                    n_full += len(fts)
+                    if not has_body:
+                        _job_log(f"  ⚠ {name} — 검색됨 but 본문 비어있음")
+                else:
+                    await store().update_watch_status(w["id"], status="notfound")
+                    _job_log(f"  → {name} — 검색 결과 없음 (법령명 확인 필요)")
+            except Exception as e:
+                _job_log(f"  ! {name} 실패: {e}")
+            j["done"] += 1
+        j["result"] = {"fulltext": n_full}
+        j["phase"] = "완료"
+        STATE["auto"]["last_init"] = datetime.now().isoformat(timespec="seconds")
+        _job_log(f"[자동] 초기 적재 완료 — 전문 {n_full}건 저장")
+    finally:
+        if col:
+            await col.close()
+        j["running"] = False
+
+
+async def _addenda_for(c: LawChange) -> str:
+    """분석용 부칙 — law_addenda에서 이번 개정의 공포일자와 일치하는 블록.
+
+    전문 텍스트에서 문자열 위치로 추측하던 것을 대체한다. 판본 정보가 없는
+    레거시 행은 기존 경로(전문에서 최신 부칙 추출)로 떨어진다.
+    """
+    if not c.law_id:
+        return ""
+    a = await store().addenda_for_version(c.law_id, c.announced_date)
+    if a and a.get("body"):
+        head = f"[{a['header']}]\n" if a.get("header") else ""
+        # 타법개정 부칙이면 본문의 조문번호가 '그 법' 기준이다.
+        # 이 사실을 알려주지 않으면 대상 법령의 조문으로 잘못 읽는다.
+        src = (f"\n※ 이 부칙은 「{a['source_law']}」의 부칙이며, 본문에 나오는 "
+               f"조문번호는 그 법 기준입니다.") if a.get("source_law") else ""
+        return f"{head}{a['body']}{src}".strip()
+    ft = await store().get_fulltext(c.law_id)
+    return latest_addenda(ft["content"]) if ft and ft.get("content") else ""
+
+
+async def _auto_analyze(force_llm_upgrade: bool = False) -> int:
+    """미분석 개정 건을 자동 분석. 분석한 건수를 반환.
+
+    캐시 판단은 content_hash(입력 + 프롬프트 버전 + 모델명)로 한다.
+    list_changes의 analyzed 플래그는 '표시용'이라 프롬프트·모델을 바꿔도
+    True로 남는데, 그걸로 건너뛰면 재분석이 영영 돌지 않는다.
+
+    force_llm_upgrade면 규칙 기반으로 저장된 건을 캐시 무시하고 다시 돌린다.
+    LLM을 껐다 켜도 모델명은 그대로라 content_hash가 안 바뀌므로, 이 우회가
+    없으면 나중에 AI 키를 넣어도 옛 규칙 결과가 영영 남는다.
+    """
+    done = 0
+    try:
+        limit = max(1, min(int(cfg()["collect"]["max_analyze"]), 200))
+        items, _ = await store().list_changes(limit=limit, offset=0)
+        model = getattr(STATE["llm"], "model", "") or ""
+        for it in items:
+            c = await store().get_change(it["mst"])
+            if not c:
+                continue
+            addenda = await _addenda_for(c)
+            chash = c.content_hash(addenda, model)
+            cached = await store().get_analysis(c.mst, chash)
+            if cached and not (force_llm_upgrade
+                               and cached.get("engine") == "rule"):
+                continue        # 같은 입력·프롬프트·모델 → 재분석 불필요
+            a = await STATE["llm"].analyze(c, addenda)
+            await store().save_analysis(c.mst, chash, a.get("engine", "rule"), a)
+            done += 1
+        if done:
+            _job_log(f"   └ 자동 분석 {done}건 완료")
+    except Exception as e:
+        logger.error(f"자동 분석 오류: {e}")
+    return done
+
+
+# ============================================================
+# 자동 실행 — 시작 시 적재 + 매일 스케줄러
+# ============================================================
+async def _run_mst_check():
+    """MST 대조 + 분리시행 큐 점검 (REFACTOR_DESIGN.md 2-3).
+
+    감시 대상의 현재 판본번호를 우리 DB와 대조해 바뀐 것만 전문을 받는다.
+    신구법 대비표가 없는 개정(타법개정 등)도 잡히고, 며칠 걸러 실행해도
+    밀린 것을 한 번에 따라잡는다.
+    """
+    j = STATE["job"]
+    j.update({"phase": "준비", "done": 0, "total": 0,
+              "log": [], "result": None, "kind": "mst_check"})
+    col = None
+    try:
+        key = cfg().get("law_api_key")
+        if not key:
+            _job_log("법제처 API 키가 없습니다 (config.json의 law_api_key).")
+            return
+        col = LawCollector(key)
+        _job_log("[자동] 판본 대조 점검 시작")
+
+        def progress(done: int, total: int, name: str):
+            j.update({"done": done, "total": total,
+                      "phase": f"판본 대조 · {name[:22]}"})
+
+        s = await core_run_check(col, store(), on_progress=progress)
+        j["total"] = s["checked"]
+        j["done"] = s["checked"]
+        _job_log(f"[자동] 점검 완료 — 대상 {s['checked']} / 개정 {s['changed']} / "
+                 f"변화없음 {s['unchanged']} / 실패 {s['failed']}")
+        if s["pending_due"]:
+            _job_log(f"   └ 분리시행 도래 {s['pending_due']}건 — "
+                     f"처리 {s['pending_done']} / 재시도 {s['pending_retry']} / "
+                     f"실패 {s['pending_failed']}")
+        for r in s["revisions"]:
+            mark = " (폴백: 비교 대상 없음)" if r.get("fallback") else ""
+            _job_log(f"⚡ {r['name']} — 변경 조항 {r['nodes']}개"
+                     f" [{r['trigger']}]{mark}")
+        if s["changed"] or s["pending_done"]:
+            await _auto_analyze()
+        j["result"] = s
+        j["phase"] = "완료"
+        STATE["auto"]["last_daily"] = datetime.now().isoformat(timespec="seconds")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(f"판본 대조 점검 오류: {e}")
+        _job_log(f"오류: {e}")
+        j["phase"] = "오류"
+    finally:
+        if col:
+            await col.close()
+        j["running"] = False
+
+
+async def _auto_init_then_schedule():
+    """시작 직후 초기적재 → 오늘 점검 안 했으면 즉시 따라잡기 → 스케줄러."""
+    await asyncio.sleep(1)          # 서버 완전 기동 대기
+    try:
+        if _try_acquire_job():
+            await _run_init_load()
+        else:
+            logger.info("[자동적재] 다른 작업 실행 중 — 건너뜀")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(f"자동 초기적재 오류: {e}")
+
+    # ── 따라잡기 ──
+    # 이게 실제로 일하는 부분이다. 맥이 잠자기거나 앱을 껐다 켜면 22:00
+    # 타이머는 못 도는데, MST 대조는 멱등이라 켜질 때 한 번 돌리면
+    # 밀린 개정을 전부 따라잡는다.
+    if cfg().get("auto", {}).get("daily_check", True):
+        try:
+            today = datetime.now().date().isoformat()
+            last = await store().last_check_date()
+            if last != today:
+                logger.info(f"[따라잡기] 마지막 점검 {last or '없음'} — 지금 실행")
+                if _try_acquire_job():
+                    await _run_mst_check()
+            else:
+                logger.info("[따라잡기] 오늘 점검 완료 — 건너뜀")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"따라잡기 오류: {e}")
+        await _daily_scheduler_loop()
+
+
+async def _daily_scheduler_loop():
+    """매일 지정 시각에 개정 확인. config의 auto.daily_time 기준."""
+    while not STATE["stopping"]:
+        hh, mm = [int(x) for x in
+                  _validate_hhmm(cfg().get("auto", {}).get("daily_time")).split(":")]
+        now = datetime.now()
+        nxt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if nxt <= now:
+            nxt += timedelta(days=1)
+        STATE["auto"]["next_daily"] = nxt.strftime("%Y-%m-%d %H:%M")
+        wait = (nxt - now).total_seconds()
+        # 30초 단위로 나눠 대기 — 종료 신호에 빨리 반응하기 위함
+        while wait > 0 and not STATE["stopping"]:
+            await asyncio.sleep(min(30, wait))
+            wait -= 30
+        if STATE["stopping"]:
+            break
+        if not _try_acquire_job():
+            logger.info("[스케줄러] 다른 작업 실행 중이라 이번 회차 건너뜀")
+            continue
+        logger.info("[스케줄러] 자동 개정 확인 실행")
+        # 잡 플래그 해제는 _run_mst_check 의 finally 가 항상 처리한다
+        try:
+            await _run_mst_check()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"자동 개정확인 오류: {e}")
+
+
+# ============================================================
+# 화면
+# ============================================================
+@api.get("/", response_class=HTMLResponse)
+async def index():
+    p = BASE_DIR / "static" / "index.html"
+    if not p.exists():
+        return HTMLResponse("<h1>static/index.html 이 없습니다</h1>", 500)
+    return HTMLResponse(p.read_text(encoding="utf-8"))
+
+
+# ============================================================
+# 조회 API (전부 읽기 전용)
+# ============================================================
+@api.get("/api/stats")
+async def api_stats():
+    s = await store().stats()
+    wl = await store().list_watch()
+    s["watch_total"] = len(wl)
+    s["watch_loaded"] = sum(1 for w in wl if w["status"] == "loaded")
+    s["watch_pending"] = sum(1 for w in wl if w["status"] == "pending")
+    s["watch_notfound"] = sum(1 for w in wl if w["status"] == "notfound")
+    s["watch_empty"] = sum(1 for w in wl if w["status"] == "empty")
+    s["auto"] = STATE["auto"]
+    s["job_running"] = STATE["job"]["running"]
+    s["llm"] = {"available": STATE["llm"].available,
+                "model": STATE["llm"].model if STATE["llm"].available else "규칙 기반"}
+    s["law_api"] = bool(cfg().get("law_api_key"))
+    return s
+
+
+@api.get("/api/watchlist")
+async def api_watch_list():
+    return await store().list_watch()
+
+
+@api.get("/api/collect/status")
+async def api_collect_status():
+    return STATE["job"]
+
+
+@api.get("/api/changes")
+async def api_changes(q: str = "", start: str = "", end: str = "",
+                      limit: int = Query(50, ge=1, le=500),
+                      offset: int = Query(0, ge=0)):
+    """기간 + 시행일 기준 조회. 한 법령이 기간 내 2회 개정되면 2건으로 나온다."""
+    items, total = await store().list_changes(q, start, end, "ef", limit, offset)
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+@api.get("/api/changes/{mst}")
+async def api_change_detail(mst: str):
+    c = await store().get_change(mst)
+    if not c:
+        raise HTTPException(404, "해당 개정 건이 없습니다")
+    d = c.to_dict()
+    # 표시용이므로 해시가 아니라 mst 기준으로 최신 분석을 붙인다.
+    # 해시로 찾으면 프롬프트나 모델을 바꾼 순간 분석이 사라진 것처럼 보인다.
+    d["analysis"] = await store().get_latest_analysis(c.mst)
+    return d
+
+
+@api.get("/api/fulltext")
+async def api_fulltext_list(q: str = "", limit: int = Query(50, ge=1, le=500),
+                            offset: int = Query(0, ge=0)):
+    """전문 목록. 각 행에 판본 수와 최근 개정의 변경 조항 수를 붙인다 —
+    전문을 열어보지 않고도 목록에서 바뀐 게 있는지 알 수 있게."""
+    items, total = await store().search_fulltext(q, limit, offset)
+    badges = await store().change_badges([i["law_id"] for i in items])
+    for i in items:
+        i.update(badges.get(i["law_id"], {}))
+    return {"items": items, "total": total}
+
+
+@api.get("/api/fulltext/{law_id}")
+async def api_fulltext_detail(law_id: str):
+    d = await store().get_fulltext(law_id)
+    if not d:
+        raise HTTPException(404, "해당 법령 전문이 없습니다")
+    return d
+
+
+@api.get("/api/articles/{law_id}")
+async def api_articles(law_id: str, version_key: str = ""):
+    """조항호목 구조로 전문을 돌려준다. version_key를 주면 그 판본, 없으면 최신.
+
+    각 노드에 사람이 읽는 조문 표기(cite)를 붙인다. 목의 호 귀속을 판정하지
+    못한 경우 표기에서 호를 생략하고 inferred 플래그를 세운다 —
+    틀린 번호를 찍는 것보다 생략이 낫다.
+    """
+    versions = await store().list_versions(law_id)
+    if not versions:
+        raise HTTPException(404, "적재된 판본이 없습니다")
+    vk = version_key or versions[0]["version_key"]
+    meta = next((v for v in versions if v["version_key"] == vk), versions[0])
+    rows = await store().get_articles(law_id, meta["version_key"])
+    nodes = []
+    for r in rows:
+        n = node_from_row(r)
+        nodes.append({
+            "depth": n.depth, "cite": n.cite(), "label": n.label,
+            "art_title": n.art_title, "body": n.body,
+            "inferred": bool(n.item_inferred),
+        })
+    addenda = await store().addenda_for_version(law_id, meta["announced_date"])
+    return {"law_id": law_id, "version": meta,
+            "versions": [{"version_key": v["version_key"],
+                          "announced_date": str(v["announced_date"] or ""),
+                          "enforce_date": str(v["enforce_date_d"] or ""),
+                          "node_count": v["node_count"],
+                          "captured_at": v["captured_at"]} for v in versions],
+            "nodes": nodes, "addenda": addenda}
+
+
+# ============================================================
+# 판본 비교 — 이전 판본 대비 변경분
+# ============================================================
+def _version_brief(v: Dict, chg: Dict) -> Dict:
+    """화면에 뿌릴 판본 요약 한 줄."""
+    return {"version_key": v["version_key"],
+            "announced_date": str(v["announced_date"] or ""),
+            "enforce_date": str(v["enforce_date_d"] or ""),
+            "node_count": v["node_count"],
+            "captured_at": v["captured_at"],
+            "diff_node_count": int(chg.get("diff_node_count") or 0),
+            "prev_version_key": chg.get("old_version_key") or "",
+            "mst": chg.get("mst") or "",
+            "is_fallback": int(chg.get("is_fallback") or 0)}
+
+
+@api.get("/api/versions/{law_id}")
+async def api_versions(law_id: str):
+    """판본 이력 — 최신순. 각 판본에 '그 판본을 만든 개정'의 변경 조항 수를 붙인다.
+
+    수치는 감지 시점에 기록된 law_changes 값을 그대로 쓴다. 목록을 열 때마다
+    판본을 실제로 대조하면 판본 수 × 조항 수만큼 비용이 든다.
+    """
+    versions = await store().list_versions(law_id)
+    changes = await store().version_changes(law_id)
+    return {"law_id": law_id,
+            "versions": [_version_brief(v, changes.get(v["version_key"], {}))
+                         for v in versions]}
+
+
+@api.get("/api/versions/{law_id}/diff")
+async def api_version_diff(law_id: str, new: str = "", old: str = ""):
+    """두 판본의 조항호목 대조 결과 (추가=초록 / 삭제=빨강 취소선).
+
+    old를 생략하면 new 바로 앞 판본과 비교한다. 앞 판본이 없으면(처음 수집한
+    법령) 자기 자신과 대조해 전부 '변경 없음'으로 그린다 — 빈 판본과 비교해
+    전문을 통째로 '추가'로 칠하면 없는 개정을 있는 것처럼 보이게 만든다.
+    """
+    versions = await store().list_versions(law_id)
+    if not versions:
+        raise HTTPException(404, "적재된 판본이 없습니다")
+    keys = [v["version_key"] for v in versions]     # captured_at 내림차순
+    new_vk = new or keys[0]
+    if new_vk not in keys:
+        raise HTTPException(404, "해당 판본이 없습니다")
+    if not old:
+        i = keys.index(new_vk)
+        old = keys[i + 1] if i + 1 < len(keys) else ""
+    if old and old not in keys:
+        raise HTTPException(404, "비교 대상 판본이 없습니다")
+
+    new_rows = await store().get_articles(law_id, new_vk)
+    old_rows = await store().get_articles(law_id, old) if old else new_rows
+    d = diff_versions(old_rows, new_rows)
+    changes = await store().version_changes(law_id)
+    meta = {v["version_key"]: v for v in versions}
+    return {"law_id": law_id,
+            "new": _version_brief(meta[new_vk], changes.get(new_vk, {})),
+            "old": (_version_brief(meta[old], changes.get(old, {}))
+                    if old else None),
+            **d}
+
+
+# ============================================================
+# 리포트 다운로드
+# ============================================================
+async def _collect_report_items(start: str, end: str, limit: int) -> List:
+    """리포트용 (개정 건, 분석 결과) 쌍.
+
+    분석은 mst 기준으로 붙인다. content_hash로 맞추면 프롬프트나 모델을
+    바꾼 순간 리포트가 통째로 비어 버린다(캐시 키와 표시 키는 역할이 다름).
+    """
+    items, _ = await store().list_changes(start=start, end=end,
+                                          date_mode="ef", limit=limit)
+    out = []
+    for it in items:
+        a = await store().get_latest_analysis(it["mst"])
+        if a:
+            out.append((it, a))
+    return out
+
+
+@api.get("/api/report/{fmt}")
+async def api_report(fmt: str, start: str = "", end: str = "",
+                     limit: int = Query(100, ge=1, le=500)):
+    if fmt not in ("md", "csv", "html"):
+        raise HTTPException(400, "fmt은 md / csv / html 중 하나여야 합니다")
+    items = await _collect_report_items(start, end, limit)
+    if not items:
+        raise HTTPException(404, "분석된 개정 건이 없습니다. 자동 분석 완료 후 다시 시도하세요.")
+    period = f"{start or '전체'} ~ {end or '전체'}"
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    if fmt == "md":
+        body = report_md(items, period)
+        return Response(body.encode("utf-8"), media_type="text/markdown; charset=utf-8",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="report_{ts}.md"'})
+    if fmt == "html":
+        body = report_html(items, period)
+        return Response(body.encode("utf-8"), media_type="text/html; charset=utf-8",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="report_{ts}.html"'})
+    p = report_csv(items, OUTPUT_DIR / f"report_{ts}.csv")
+    return FileResponse(p, media_type="text/csv", filename=p.name)
+
+
+def _disposition(name: str) -> str:
+    """한글 파일명용 Content-Disposition (RFC 5987).
+
+    HTTP 헤더는 latin-1로 인코딩되므로 한글을 그대로 넣으면 응답 자체가 깨진다.
+    filename*= 에 UTF-8 인코딩본을 싣고, 이를 못 읽는 구형 클라이언트를 위해
+    filename= 에는 ASCII만 남긴 대체명을 준다.
+
+    대체명을 퍼센트 인코딩하면 옛 클라이언트에 '%EB%8F%84...'로 저장되므로,
+    한글을 지우고 사람이 알아볼 수 있는 이름을 남긴다.
+    """
+    ext = "." + name.rsplit(".", 1)[-1] if "." in name else ""
+    ascii_name = re.sub(r"[^A-Za-z0-9._-]", "", name)
+    ascii_name = re.sub(r"_{2,}", "_", ascii_name).lstrip("_")
+    if not ascii_name or ascii_name == ext or ascii_name == ext.lstrip("."):
+        ascii_name = "report" + ext
+    return (f'attachment; filename="{ascii_name}"; '
+            f"filename*=UTF-8''{quote(name)}")
+
+
+@api.get("/api/report-one/{mst}/{fmt}")
+async def api_report_one(mst: str, fmt: str):
+    """개정 1건짜리 개별 보고서. 전체 리포트와 같은 서식을 쓴다."""
+    if fmt not in ("md", "csv", "html"):
+        raise HTTPException(400, "fmt은 md / csv / html 중 하나여야 합니다")
+    c = await store().get_change(mst)
+    if not c:
+        raise HTTPException(404, "해당 개정 건이 없습니다")
+    a = await store().get_latest_analysis(mst)
+    if not a:
+        raise HTTPException(404, "아직 분석되지 않은 개정 건입니다")
+    items = [(c.to_dict(), a)]
+    safe = re.sub(r"[^\w가-힣]+", "_", c.title or mst).strip("_")[:40] or "report"
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    period = c.title or mst
+    if fmt == "csv":
+        p = report_csv(items, OUTPUT_DIR / f"{safe}_{ts}.csv")
+        return FileResponse(p, media_type="text/csv", filename=p.name)
+    body, mime = ((report_md(items, period), "text/markdown") if fmt == "md"
+                  else (report_html(items, period), "text/html"))
+    return Response(body.encode("utf-8"), media_type=f"{mime}; charset=utf-8",
+                    headers={"Content-Disposition":
+                             _disposition(f"{safe}_{ts}.{fmt}")})
+
+
+# ============================================================
+# 수동 개정 확인 — 스케줄러를 기다리지 않고 지금 한 번 돌린다
+# ============================================================
+@api.post("/api/check-now")
+async def api_check_now():
+    """매일 도는 판본 대조를 지금 실행한다. (개발 중 데이터를 쌓을 때)
+
+    감시 법령을 전부 순회하며 법제처를 호출하므로 수 분 걸린다. 요청을 붙잡고
+    있으면 타임아웃이 나므로 백그라운드로 띄우고 즉시 반환한다.
+    진행 상황과 결과는 /api/collect/status 로 확인한다.
+
+    스케줄러가 도는 것과 완전히 같은 경로다. 판본 대조는 멱등이라 여러 번
+    눌러도 무해하지만, 이미 실행 중이면 409로 막는다.
+    """
+    if not cfg().get("law_api_key"):
+        raise HTTPException(400, "법제처 API 키가 없습니다. 설정에서 먼저 넣어주세요.")
+    if not _try_acquire_job():
+        raise HTTPException(409, "이미 다른 작업이 실행 중입니다.")
+    # 태스크 참조를 STATE에 붙들어 둔다. 지역변수로 두면 실행 도중
+    # 가비지 컬렉션될 수 있다(asyncio가 강한 참조를 갖지 않는다).
+    STATE["manual_task"] = asyncio.create_task(_run_mst_check())
+    return {"ok": True, "message": "개정 확인을 시작했습니다."}
+
+
+# ============================================================
+# 감시 법령 관리
+# ============================================================
+@api.post("/api/watchlist")
+async def api_watch_add(body: Dict = Body(...)):
+    """감시 법령 추가. 전문은 다음 자동 적재(또는 서버 재시작) 때 수집된다."""
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "법령명을 입력하세요")
+    category = body.get("category") or "법령"
+    if category not in ("법령", "행정규칙", "정보시스템 운영"):
+        category = "법령"
+    ok = await store().add_watch(name, memo=body.get("memo", ""),
+                                 ministry=body.get("ministry", ""),
+                                 category=category)
+    if not ok:
+        raise HTTPException(409, "이미 등록된 법령입니다")
+    return {"ok": True}
+
+
+@api.post("/api/watchlist/{wid}/toggle")
+async def api_watch_toggle(wid: int, body: Dict = Body(...)):
+    """감시 사용/중지. 껐다고 지워지는 것은 없고, 수집·점검 대상에서만 빠진다."""
+    w = await store().get_watch(wid)
+    if not w:
+        raise HTTPException(404, "해당 감시 항목이 없습니다")
+    enabled = bool(body.get("enabled"))
+    await store().toggle_watch(wid, enabled)
+    return {"ok": True, "name": w["name"], "enabled": enabled}
+
+
+@api.get("/api/watchlist/{wid}/data")
+async def api_watch_data(wid: int):
+    """이 감시 항목에 딸린 데이터 규모. 삭제 확인창이 숫자를 보여주려고 부른다."""
+    w = await store().get_watch(wid)
+    if not w:
+        raise HTTPException(404, "해당 감시 항목이 없습니다")
+    return {**w, "data": await store().law_data_stats(w["law_id"])}
+
+
+@api.delete("/api/watchlist/{wid}")
+async def api_watch_del(wid: int, purge: bool = False):
+    """감시 목록에서 제거. purge=true면 수집된 전문·판본·조항·부칙까지 지운다.
+
+    purge를 켜도 개정 이력(law_changes)과 분석 결과(analyses)는 남긴다.
+    재수집으로 복구되지 않는 자산이고, AI 분석은 실제 비용이 들어간 결과다.
+    """
+    w = await store().get_watch(wid)
+    if not w:
+        raise HTTPException(404, "해당 감시 항목이 없습니다")
+    purged = {}
+    if purge and w["law_id"]:
+        purged = await store().law_data_stats(w["law_id"])
+        await store().delete_fulltext(w["law_id"])
+    await store().del_watch(wid)
+    return {"ok": True, "name": w["name"], "purged": purged}
+
+
+@api.delete("/api/fulltext/{law_id}")
+async def api_fulltext_del(law_id: str):
+    """전문·판본·조항호목·부칙을 지우고 상태를 pending으로 되돌린다 → 다음 수집 때
+    다시 받아온다. 삭제가 목적이 아니라 '강제 재수집'이 목적인 경로다.
+
+    개정 이력과 분석 결과는 지우지 않는다(재적재로 복구되지 않는 자산).
+    """
+    if not await store().get_fulltext(law_id):
+        raise HTTPException(404, "해당 법령 전문이 없습니다")
+    await store().delete_fulltext(law_id)
+    return {"ok": True}
+
+
+# ============================================================
+# 설정 — 인증 없음. 127.0.0.1 바인딩 전제의 시연용 화면이다.
+# ============================================================
+def _mask(s: str) -> str:
+    """키를 화면에 보낼 때 뒤 4자만 남기고 가린다."""
+    s = s or ""
+    if len(s) <= 4:
+        return "****" if s else ""
+    return "•" * (len(s) - 4) + s[-4:]
+
+
+@api.get("/api/config")
+async def api_config_get():
+    c = cfg()
+    llm = c.get("llm", {})
+    return {"law_api_key_set": bool(c.get("law_api_key")),
+            "law_api_key_masked": _mask(c.get("law_api_key", "")),
+            "llm_enabled": bool(llm.get("enabled")),
+            "llm_key_set": bool(llm.get("api_key")),
+            "llm_key_masked": _mask(llm.get("api_key", "")),
+            "llm_model": llm.get("model", ""),
+            "llm_base_url": llm.get("base_url", ""),
+            "daily_time": c.get("auto", {}).get("daily_time", "")}
+
+
+@api.post("/api/config")
+async def api_config_set(body: Dict = Body(...)):
+    """키·모델을 config.json에 저장하고 즉시 반영. 키를 비워 보내면 기존 값 유지."""
+    c = cfg()
+    if body.get("law_api_key"):
+        c["law_api_key"] = body["law_api_key"].strip()
+    llm = c.setdefault("llm", {})
+    if "llm_enabled" in body:
+        llm["enabled"] = bool(body["llm_enabled"])
+    if body.get("llm_key"):
+        llm["api_key"] = body["llm_key"].strip()
+    if body.get("llm_model"):
+        llm["model"] = body["llm_model"].strip()
+    if "llm_base_url" in body:
+        llm["base_url"] = (body.get("llm_base_url") or "").strip()
+    if body.get("daily_time"):
+        # 스케줄러는 매 회차마다 cfg를 다시 읽으므로 다음 회차부터 반영된다
+        c.setdefault("auto", {})["daily_time"] = _validate_hhmm(body["daily_time"])
+
+    save_config(c)
+    try:
+        if STATE.get("llm"):
+            await STATE["llm"].close()
+    except Exception as e:
+        logger.warning(f"이전 LLM 클라이언트 정리 실패: {e}")
+    STATE["llm"] = LLMClient(c["llm"])
+    logger.info("설정 변경 — 저장 및 반영 완료")
+    return {"ok": True, "llm_available": STATE["llm"].available,
+            "law_api_key_set": bool(c.get("law_api_key"))}
+
+
+@api.post("/api/reanalyze")
+async def api_reanalyze():
+    """규칙 기반으로만 분석된 건을 지금 AI로 다시 분석한다.
+
+    AI 키를 나중에 넣은 경우를 위한 것이다. 모델명이 그대로면 content_hash도
+    그대로라 평소 경로로는 캐시에 막혀 재분석이 돌지 않는다.
+    """
+    if not STATE["llm"].available:
+        raise HTTPException(400, "AI가 꺼져 있습니다. 설정에서 AI 키를 먼저 넣어주세요.")
+    if not _try_acquire_job():
+        raise HTTPException(409, "다른 작업이 실행 중입니다. 잠시 후 다시 시도하세요.")
+    try:
+        done = await _auto_analyze(force_llm_upgrade=True)
+    finally:
+        STATE["job"]["running"] = False
+    return {"ok": True, "reanalyzed": done,
+            "message": f"{done}건을 AI로 다시 분석했습니다."}
+
+
+# ============================================================
+# 문서 업로드 → 법령 저촉 검사 (LLM 미사용)
+# ============================================================
+MAX_UPLOAD = 20 * 1024 * 1024
+CHECKS_DIR = OUTPUT_DIR / "checks"
+
+DOC_EXT = (".hwp", ".hwpx", ".pdf", ".docx", ".txt")
+SHEET_EXT = (".xlsx", ".xlsm", ".csv")
+
+# 검사ID는 파일 경로가 되므로 형식을 강제한다. 그대로 이어 붙이면
+# '../..'로 아무 파일이나 읽어 갈 수 있다.
+CHECK_ID_RE = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{6}$")
+
+
+def _new_check_id() -> str:
+    return f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+
+def _save_check(result: Dict):
+    """검사 결과 1건을 JSON으로 남긴다. 검사ID는 이미 들어 있다.
+
+    DB를 쓰지 않는 이유는 문서 검사 경로 전체와 같다 — 감시목록과 무관하게
+    돌아가야 하고, 이 결과 때문에 스키마가 늘어날 이유가 없다.
+
+    끝난 것만 파일로 쓴다. 진행 중 상태를 파일에 남기면 서버가 중간에 죽었을 때
+    영원히 '진행중'인 행이 목록에 박힌다. 진행 상황은 메모리(STATE["checks"])에
+    두고, 서버가 죽으면 그 검사는 없었던 것이 맞다.
+    """
+    CHECKS_DIR.mkdir(parents=True, exist_ok=True)
+    (CHECKS_DIR / f"{result['검사ID']}.json").write_text(
+        json.dumps(result, ensure_ascii=False), encoding="utf-8")
+
+
+def _load_check(cid: str) -> Dict:
+    """저장된 결과 또는 진행 중 상태.
+
+    메모리를 먼저 본다. 진행 중인 검사는 아직 파일이 없다.
+    """
+    if not CHECK_ID_RE.match(cid):
+        raise HTTPException(400, "검사ID 형식이 올바르지 않습니다")
+    live = STATE["checks"].get(cid)
+    if live and live.get("상태") != "완료":
+        return live
+    p = CHECKS_DIR / f"{cid}.json"
+    if not p.exists():
+        raise HTTPException(404, "저장된 검사 결과가 없습니다")
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+async def _run_check(cid: str, cites: List[Dict], base_date: str,
+                     meta: Dict, sheet_errors: List[Dict]):
+    """느린 부분만 백그라운드로. 추출·탐지는 이미 끝난 상태로 들어온다."""
+    live = STATE["checks"][cid]
+    col = LawCollector(cfg()["law_api_key"])
+    try:
+        def progress(done: int, total: int):
+            live["진행"] = {"done": done, "total": total}
+        await checker.resolve_citations(col, cites, base_date,
+                                       on_progress=progress)
+        result = {"검사ID": cid, "상태": "완료", **meta, "인용": cites,
+                  "문제": checker.problems(cites),
+                  "요약": checker.summarize(cites),
+                  "양식오류": sheet_errors, "기준일": base_date,
+                  "검사일시": datetime.now().strftime("%Y-%m-%d %H:%M")}
+        _save_check(result)
+        live.update({"상태": "완료"})
+    except asyncio.CancelledError:
+        live.update({"상태": "실패", "오류": "서버 종료로 중단됐습니다"})
+        raise
+    except Exception as e:
+        logger.error(f"문서 검사 실패 ({meta.get('파일명')}): {e}")
+        live.update({"상태": "실패", "오류": str(e)})
+    finally:
+        await col.close()
+        STATE["check_running"] = False
+
+
+@api.get("/api/check-template")
+def api_check_template():
+    """빈 양식 내려받기 — 사용자가 여기에 법령·조를 적어 다시 올린다."""
+    return Response(
+        sheet.build_template(),
+        media_type="application/vnd.openxmlformats-officedocument."
+                   "spreadsheetml.sheet",
+        headers={"Content-Disposition": _disposition("법령검사_양식.xlsx")})
+
+
+@api.get("/api/checks")
+def api_check_list(limit: int = Query(20, ge=1, le=100)):
+    """최근 검사 목록 — 최신순. 본문은 빼고 표지만 준다.
+
+    진행 중·실패한 검사를 맨 위에 함께 준다. 목록에 없으면 사용자는 검사가
+    시작된 것조차 확인할 수 없다.
+    """
+    out = [dict(v) for v in STATE["checks"].values()
+           if v.get("상태") != "완료"]
+    out.sort(key=lambda v: v["검사ID"], reverse=True)
+    if not CHECKS_DIR.exists():
+        return {"items": out}
+    for p in sorted(CHECKS_DIR.glob("*.json"), reverse=True)[:limit]:
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue        # 쓰다 만 파일 하나가 목록 전체를 막지 않게 한다
+        out.append({"검사ID": d.get("검사ID", p.stem),
+                    "파일명": d.get("파일명", ""),
+                    "검사일시": d.get("검사일시", ""),
+                    "요약": d.get("요약", {})})
+    return {"items": out}
+
+
+@api.get("/api/checks/{cid}")
+def api_check_get(cid: str):
+    return _load_check(cid)
+
+
+@api.get("/api/checks/{cid}/download/{fmt}")
+def api_check_download(cid: str, fmt: str):
+    """저장된 검사 결과를 마크다운 / PDF로 내려준다."""
+    if fmt not in ("md", "pdf"):
+        raise HTTPException(400, "md / pdf 만 지원합니다")
+    d = _load_check(cid)
+    stem = os.path.splitext(d.get("파일명") or "검사결과")[0]
+    name = f"{stem}_법령검사_{cid[:8]}.{fmt}"
+    if fmt == "md":
+        return Response(report.to_markdown(d).encode("utf-8"),
+                        media_type="text/markdown; charset=utf-8",
+                        headers={"Content-Disposition": _disposition(name)})
+    try:
+        body = report.to_pdf(d)
+    except RuntimeError as e:      # 한글 글꼴 없음 — 네모만 찍힌 PDF를 주지 않는다
+        raise HTTPException(500, str(e))
+    return Response(body, media_type="application/pdf",
+                    headers={"Content-Disposition": _disposition(name)})
+
+
+@api.post("/api/check-document")
+async def api_check_document(file: UploadFile = File(...),
+                             base_date: str = Form("")):
+    """문서 또는 양식에서 법령 인용을 모아 현행법과 대조한다.
+
+    입력이 두 가지다. 자유 문서(hwp/hwpx/pdf/docx/txt)는 정규식으로 인용을
+    뽑고, 양식(xlsx/csv)은 사용자가 적은 그대로 읽는다. 어느 쪽이든 인용
+    목록의 모양이 같아 이후 경로(조 대조·저장·다운로드)를 공유한다.
+
+    법령명이 현행에 있는지(판정)와 인용된 조가 바뀌었는지(조항판정)를 함께
+    본다. 조회는 법제처 API만 쓰고 DB는 거치지 않는다 — 감시목록 안팎이
+    같은 경로를 타야 판정이 일관된다.
+
+    base_date(YYYY-MM-DD 또는 YYYYMMDD)를 주면 그날 시행 중이던 판본과
+    대조해 '기준일 이후 개정'을 잡는다. 비우면 현행 바로 앞 판본과 대조해
+    가장 최근 시행된 개정만 본다.
+
+    **바로 끝나지 않는다.** 검사ID를 즉시 돌려주고, 느린 부분(법제처 조회)은
+    뒤에서 돈다. 진행 상황과 결과는 GET /api/checks/{검사ID}로 본다.
+    법령마다 판본을 받아 대조하므로 인용이 많으면 분 단위가 되고, 그대로
+    응답을 붙들고 있으면 브라우저가 먼저 끊는다.
+
+    추출·탐지는 여기서 끝낸다. 전부 로컬 작업이라 빠르고, 읽을 수 없는 파일을
+    202로 받아 놓고 나중에 실패하는 것보다 지금 400으로 되돌리는 편이 낫다.
+    """
+    base_date = re.sub(r"\D", "", base_date or "")
+    if base_date and len(base_date) != 8:
+        raise HTTPException(400, "기준일은 YYYY-MM-DD 형식으로 넣어주세요")
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in DOC_EXT and ext not in SHEET_EXT:
+        raise HTTPException(
+            400, "문서(hwp/hwpx/pdf/docx/txt) 또는 양식(xlsx/csv)만 지원합니다")
+    if not cfg().get("law_api_key"):
+        raise HTTPException(400, "법제처 API 키가 없습니다. 설정에서 먼저 넣어주세요.")
+    if STATE["check_running"]:
+        raise HTTPException(409, "다른 검사가 진행 중입니다. 끝난 뒤 다시 올려주세요.")
+    data = await file.read()
+    if len(data) > MAX_UPLOAD:
+        raise HTTPException(413, f"파일이 너무 큽니다 (상한 {MAX_UPLOAD // 1048576}MB)")
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+    try:
+        tmp.write(data)
+        tmp.close()
+        if ext in SHEET_EXT:
+            cites, sheet_errors = sheet.parse(data, ext)
+            size = {"입력": "양식", "행수": len(cites) + len(sheet_errors)}
+        else:
+            text = analyzer.extract_text(tmp.name)
+            cites, sheet_errors = analyzer.find_citations(text), []
+            size = {"입력": "문서", "글자수": len(text)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"문서 읽기 실패 ({file.filename}): {e}")
+        raise HTTPException(400, f"파일을 읽지 못했습니다: {e}")
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+    cid = _new_check_id()
+    meta = {"파일명": file.filename, **size}
+    STATE["checks"][cid] = {"검사ID": cid, "상태": "진행중", **meta,
+                            "진행": {"done": 0, "total": len(cites)}}
+    STATE["check_running"] = True
+    STATE["check_task"] = asyncio.create_task(
+        _run_check(cid, cites, base_date, meta, sheet_errors))
+    return {"검사ID": cid, "상태": "진행중", "인용수": len(cites), **meta}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(api, host="127.0.0.1", port=8000, log_level="info")
