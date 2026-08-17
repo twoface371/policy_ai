@@ -23,6 +23,7 @@ import json
 import uuid
 import asyncio
 import tempfile
+import unicodedata
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
@@ -1098,6 +1099,18 @@ async def api_report(request: Request, fmt: str, start: str = "",
     return FileResponse(p, media_type="text/csv", filename=p.name)
 
 
+def _nfc(s: str) -> str:
+    """한글 문자열을 NFC(결합형)로 맞춘다.
+
+    macOS는 파일명을 NFD(분해형)로 넘긴다 — '테' 한 글자가 ㅌ+ㅔ 두 코드포인트로
+    쪼개져 온다. 브라우저는 이것을 알아서 합쳐 보여주지만 PDF 글꼴은 자모를
+    그대로 그려서 '테스트'가 'ㅌㅔㅅㅡㅌㅡ'로 찍힌다.
+
+    받는 즉시 맞춰 두면 저장·표시·다운로드 파일명이 전부 같은 형태가 된다.
+    """
+    return unicodedata.normalize("NFC", s or "")
+
+
 def _disposition(name: str) -> str:
     """한글 파일명용 Content-Disposition (RFC 5987).
 
@@ -1542,6 +1555,9 @@ def _load_check(cid: str, user: Dict) -> Dict:
     d = json.loads(p.read_text(encoding="utf-8"))
     if not _owns(d, user):
         raise HTTPException(404, "저장된 검사 결과가 없습니다")
+    # 이 수정 전에 저장된 결과는 파일명이 NFD로 들어 있다. 파일을 고쳐 쓰지
+    # 않고 읽을 때 맞춘다 — 지난 결과도 PDF에서 제대로 나와야 한다.
+    d["파일명"] = _nfc(d.get("파일명", ""))
     return d
 
 
@@ -1611,7 +1627,7 @@ def api_check_list(request: Request, limit: int = Query(20, ge=1, le=100)):
             continue
         mine += 1
         out.append({"검사ID": d.get("검사ID", p.stem),
-                    "파일명": d.get("파일명", ""),
+                    "파일명": _nfc(d.get("파일명", "")),
                     "검사일시": d.get("검사일시", ""),
                     "요약": d.get("요약", {})})
     return {"items": out}
@@ -1707,7 +1723,8 @@ async def api_check_document(request: Request, file: UploadFile = File(...),
     cid = _new_check_id()
     # 소유자는 meta에 넣는다. _run_check가 meta를 결과에 펼쳐 넣으므로
     # 저장 파일과 진행 중 상태가 같은 키를 갖게 된다.
-    meta = {"파일명": file.filename, "소유자": current_user(request)["id"], **size}
+    meta = {"파일명": _nfc(file.filename), "소유자": current_user(request)["id"],
+            **size}
     STATE["checks"][cid] = {"검사ID": cid, "상태": "진행중", **meta,
                             "진행": {"done": 0, "total": len(cites)}}
     STATE["check_running"] = True
