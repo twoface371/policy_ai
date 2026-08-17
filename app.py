@@ -524,14 +524,26 @@ def _try_acquire_job() -> bool:
     return True
 
 
-def _validate_hhmm(t: str) -> str:
+DEFAULT_DAILY_TIME = "08:00"
+
+
+def _validate_hhmm(t: str) -> Optional[str]:
+    """'HH:MM'이면 정규화해서, 아니면 None을 준다.
+
+    조용히 기본값으로 바꾸지 않는다. 예전에는 잘못된 값도 08:00으로
+    바꿔 놓고 성공을 돌려줘서, 사용자는 자기가 넣은 시각에 점검이 도는
+    줄 알지만 실제로는 다른 시각에 돌았다.
+
+    스케줄러는 이미 저장된 값을 읽는 쪽이라 None이면 기본값으로 돈다 —
+    설정 파일이 손상돼도 매일 점검은 멈추지 않아야 한다.
+    """
     try:
         hh, mm = [int(x) for x in str(t).split(":")]
-        if 0 <= hh <= 23 and 0 <= mm <= 59:
-            return f"{hh:02d}:{mm:02d}"
-    except (ValueError, AttributeError):
-        pass
-    return "08:00"
+    except (ValueError, AttributeError, TypeError):
+        return None
+    if 0 <= hh <= 23 and 0 <= mm <= 59:
+        return f"{hh:02d}:{mm:02d}"
+    return None
 
 
 async def _run_init_load():
@@ -733,8 +745,9 @@ async def _auto_init_then_schedule():
 async def _daily_scheduler_loop():
     """매일 지정 시각에 개정 확인. config의 auto.daily_time 기준."""
     while not STATE["stopping"]:
-        hh, mm = [int(x) for x in
-                  _validate_hhmm(cfg().get("auto", {}).get("daily_time")).split(":")]
+        hhmm = (_validate_hhmm(cfg().get("auto", {}).get("daily_time"))
+                or DEFAULT_DAILY_TIME)
+        hh, mm = [int(x) for x in hhmm.split(":")]
         now = datetime.now()
         nxt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if nxt <= now:
@@ -1405,7 +1418,17 @@ async def api_config_get(_: Dict = Depends(super_only)):
 @api.post("/api/config")
 async def api_config_set(body: Dict = Body(...),
                          _: Dict = Depends(super_only)):
-    """키·모델을 config.json에 저장하고 즉시 반영. 키를 비워 보내면 기존 값 유지."""
+    """키·모델을 config.json에 저장하고 즉시 반영. 키를 비워 보내면 기존 값 유지.
+
+    검증은 아무것도 손대기 전에 끝낸다. c는 STATE["cfg"]를 그대로 가리키므로,
+    중간에 예외를 던지면 저장은 안 됐는데 메모리만 바뀐 상태가 남는다.
+    """
+    hhmm = None
+    if body.get("daily_time"):
+        hhmm = _validate_hhmm(body["daily_time"])
+        if hhmm is None:
+            raise HTTPException(400, "확인 시각은 HH:MM 형식이어야 합니다 (예: 22:00)")
+
     c = cfg()
     if body.get("law_api_key"):
         c["law_api_key"] = body["law_api_key"].strip()
@@ -1418,9 +1441,9 @@ async def api_config_set(body: Dict = Body(...),
         llm["model"] = body["llm_model"].strip()
     if "llm_base_url" in body:
         llm["base_url"] = (body.get("llm_base_url") or "").strip()
-    if body.get("daily_time"):
+    if hhmm:
         # 스케줄러는 매 회차마다 cfg를 다시 읽으므로 다음 회차부터 반영된다
-        c.setdefault("auto", {})["daily_time"] = _validate_hhmm(body["daily_time"])
+        c.setdefault("auto", {})["daily_time"] = hhmm
 
     save_config(c)
     try:
