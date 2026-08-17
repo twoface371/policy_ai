@@ -53,6 +53,14 @@ async def lifespan(_app: FastAPI):
     await STATE["store"].connect()
     STATE["llm"] = LLMClient(STATE["cfg"]["llm"])
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # 만료 세션 청소. 스케줄러도 매일 돌지만 그것을 꺼 둔 배포가 있고,
+    # 로컬처럼 자주 재시작하는 환경에서는 이쪽이 실질적인 청소 시점이다.
+    try:
+        n = await STATE["store"].purge_expired_sessions()
+        if n:
+            logger.info(f"만료 세션 {n}건 정리")
+    except Exception as e:
+        logger.warning(f"만료 세션 정리 실패: {e}")
     logger.info("서버 준비 완료 → http://127.0.0.1:8000")
 
     auto = STATE["cfg"].get("auto", {})
@@ -739,6 +747,15 @@ async def _daily_scheduler_loop():
             wait -= 30
         if STATE["stopping"]:
             break
+        # 만료 세션 청소 — 매일 한 번이면 충분하다. 만료된 세션은 이미
+        # 로그인이 막히지만, 치우지 않으면 테이블이 계속 자란다.
+        try:
+            n = await store().purge_expired_sessions()
+            if n:
+                logger.info(f"[스케줄러] 만료 세션 {n}건 정리")
+        except Exception as e:
+            logger.warning(f"만료 세션 정리 실패: {e}")
+
         if not _try_acquire_job():
             logger.info("[스케줄러] 다른 작업 실행 중이라 이번 회차 건너뜀")
             continue
@@ -818,20 +835,29 @@ async def login_page():
 # ============================================================
 # 조회 API (전부 읽기 전용)
 # ============================================================
-@api.get("/api/stats")
-async def api_stats(request: Request):
-    """현황 숫자. 기본은 내 목록 기준이다.
+async def scope_law_ids(request: Request) -> Optional[List[str]]:
+    """이 사용자의 조회 범위. None이면 전사 전체.
 
-    전사 관리자는 소속 부서가 없어 개인 목록이 비므로, 그대로 두면
-    107건을 수집 중인데도 화면이 전부 0으로 보인다. 고장으로 오해할
-    숫자라 이 경우만 전사 기준으로 낸다.
+    전사 관리자는 소속 부서가 없어 개인 목록이 비어 있다. 그대로 두면
+    현황에는 숫자가 뜨는데 개정사항·법령 전문·리포트는 전부 빈 화면이
+    되어 고장으로 보인다. 규칙을 여기 한 곳에 두고 조회 경로 전체가
+    같은 답을 쓰게 한다.
     """
     user = current_user(request)
     if user["role"] == "superadmin" and not user["dept_id"]:
-        s = await store().stats()
+        return None
+    return await store().visible_law_ids(user["id"])
+
+
+@api.get("/api/stats")
+async def api_stats(request: Request):
+    """현황 숫자. 기본은 내 목록 기준, 전사 관리자는 전사 기준."""
+    user = current_user(request)
+    ids = await scope_law_ids(request)
+    s = await store().stats(ids)
+    if ids is None:
         wl = await store().list_watch()
     else:
-        s = await store().stats(await store().visible_law_ids(user["id"]))
         wl = [w for w in await store().list_user_watch(user["id"])
               if not w["muted"]]
     s["watch_total"] = len(wl)
@@ -870,9 +896,9 @@ async def api_changes(request: Request, q: str = "", start: str = "",
     내 목록의 법령만 본다. 개정 알림은 '내 일'이어야 의미가 있고, 전사
     개정이 섞이면 정작 봐야 할 것이 묻힌다.
     """
-    ids = await store().visible_law_ids(current_user(request)["id"])
-    items, total = await store().list_changes(q, start, end, "ef",
-                                              limit, offset, law_ids=ids)
+    items, total = await store().list_changes(
+        q, start, end, "ef", limit, offset,
+        law_ids=await scope_law_ids(request))
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
@@ -899,8 +925,8 @@ async def api_fulltext_list(request: Request, q: str = "",
     않는다. 법령은 법제처가 공개하는 정보이고, 다른 부서 소관 법을 참고로
     열어 보는 것은 정상 업무다.
     """
-    ids = await store().visible_law_ids(current_user(request)["id"])
-    items, total = await store().search_fulltext(q, limit, offset, law_ids=ids)
+    items, total = await store().search_fulltext(
+        q, limit, offset, law_ids=await scope_law_ids(request))
     badges = await store().change_badges([i["law_id"] for i in items])
     for i in items:
         i.update(badges.get(i["law_id"], {}))
@@ -1039,8 +1065,8 @@ async def api_report(request: Request, fmt: str, start: str = "",
     """내 목록 기준 리포트. 화면에 보이는 것과 받아 보는 것이 같아야 한다."""
     if fmt not in ("md", "csv", "html"):
         raise HTTPException(400, "fmt은 md / csv / html 중 하나여야 합니다")
-    ids = await store().visible_law_ids(current_user(request)["id"])
-    items = await _collect_report_items(start, end, limit, law_ids=ids)
+    items = await _collect_report_items(start, end, limit,
+                                        law_ids=await scope_law_ids(request))
     if not items:
         raise HTTPException(404, "분석된 개정 건이 없습니다. 자동 분석 완료 후 다시 시도하세요.")
     period = f"{start or '전체'} ~ {end or '전체'}"

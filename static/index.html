@@ -1064,7 +1064,13 @@ function renderWatch() {
       >${w.muted ? '재개' : '중지'}</button></td>
     <td>${del}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="8" class="muted">해당 법령이 없습니다.</td></tr>';
+  }).join('') || `<tr><td colspan="8" class="muted">${
+    // 전사 관리자는 소속 부서가 없어 '내 목록'이 비어 있다. 빈 표만 보여
+    // 주면 고장으로 보이므로 어디로 가야 하는지 알려 준다.
+    (ME && ME.role === 'superadmin' && !ME.dept_id && !WATCH.length)
+      ? '전사 관리자는 소속 부서가 없어 개인 감시 목록이 없습니다. '
+        + '전사 감시 대상은 <b>설정</b> 탭에서, 부서별 목록은 각 부서 관리자가 봅니다.'
+      : '해당 법령이 없습니다.'}</td></tr>`;
 }
 
 // 개인 중지 — 내 화면에서만 뺀다. 수집은 계속 돌고 남에게 영향이 없다.
