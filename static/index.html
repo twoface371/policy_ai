@@ -313,7 +313,7 @@ del.df-del{background:#fadcdc;color:#932626;text-decoration:line-through;
     <div class="panel">
       <h2>계정 추가</h2>
       <div class="row">
-        <input id="ua-email" placeholder="이메일" style="min-width:200px">
+        <input id="ua-email" type="email" placeholder="이메일" style="min-width:200px">
         <input id="ua-name" placeholder="이름" style="min-width:110px">
         <input id="ua-pw" type="password" placeholder="비밀번호 (8자 이상)" style="min-width:170px">
         <select id="ua-dept" style="min-width:130px"></select>
@@ -1369,7 +1369,7 @@ async function changeEmail(id, cur) {
     title: '이메일 변경', ok: '변경',
     desc: '로그인에 쓰는 주소가 바뀝니다.<br>'
         + '열려 있는 세션은 유지되지만, 다음 로그인부터는 새 주소를 써야 합니다.',
-    fields: [{id:'email', label:'새 이메일', value: cur}]});
+    fields: [{id:'email', label:'새 이메일', type:'email', value: cur}]});
   if (!v || v.email.trim().toLowerCase() === cur) return;
   try {
     const r = await jpost(`/api/admin/users/${id}/email`, {email: v.email});

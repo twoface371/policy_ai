@@ -202,6 +202,14 @@ async def api_me(request: Request):
 
 MIN_PASSWORD = 8
 
+# 로그인 아이디로 쓰는 값이라 최소한의 꼴만 확인한다. 사내 계정이라 도메인을
+# 제한하지 않고, 실제 수신 가능 여부도 여기서는 따지지 않는다.
+#
+# 생성·변경 양쪽에 똑같이 건다. 로그인 화면의 입력이 type="email"이라
+# 브라우저가 '@' 없는 값을 막는데, 생성 쪽만 비어 있으면 로그인할 수 없는
+# 계정이 만들어진다(실제로 그렇게 만들어진 계정이 있었다).
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
 
 @api.post("/api/auth/password")
 async def api_change_password(request: Request, body: Dict = Body(...)):
@@ -344,8 +352,8 @@ async def api_user_add(body: Dict = Body(...),
     email = (body.get("email") or "").strip().lower()
     password = body.get("password") or ""
     role = body.get("role") or "member"
-    if not email:
-        raise HTTPException(400, "이메일을 입력하세요")
+    if not EMAIL_RE.match(email):
+        raise HTTPException(400, "이메일 형식이 올바르지 않습니다")
     if len(password) < MIN_PASSWORD:
         raise HTTPException(400, f"비밀번호는 {MIN_PASSWORD}자 이상이어야 합니다")
     if role not in ROLE_RANK:
@@ -395,11 +403,6 @@ async def api_user_toggle(uid: int, body: Dict = Body(...),
     enabled = bool(body.get("enabled"))
     await store().set_user_enabled(uid, enabled)
     return {"ok": True, "email": target["email"], "enabled": enabled}
-
-
-# 로그인 아이디로 쓰는 값이라 최소한의 꼴만 확인한다. 사내 계정이라
-# 도메인을 제한하지 않고, 실제 수신 가능 여부도 여기서는 따지지 않는다.
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 @api.post("/api/admin/users/{uid}/email")
