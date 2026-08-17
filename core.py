@@ -10,7 +10,8 @@ DB를 또 바꿀 때 손볼 곳: _exec/_fetch/_exec_many/_schema/_ensure_columns
 그리고 ON CONFLICT 7곳. 업무 로직에는 SQL이 없습니다.
 ================================================================================
 """
-import os, re, csv, gzip, json, time, asyncio, difflib, hashlib, logging
+import os, re, csv, gzip, hmac, json, time, asyncio, difflib, hashlib, logging
+import secrets
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Optional, List, Dict, Tuple, Any
@@ -72,6 +73,9 @@ def latest_addenda(content: str) -> str:
         return ""
     nxt = ADDENDA_HEAD_RE.search(content, m.end())
     return content[m.start():(nxt.start() if nxt else len(content))].strip()
+
+# 계정 기능을 켤 때 만들어지는 부서. 기존 감시 법령이 전부 여기로 귀속된다.
+DEFAULT_DEPT_NAME = "기본 부서"
 
 # 사보원 감시 대상 법령 — (법령명, 소관부처, 구분)
 # 왼쪽 표: 검색 법령 / 오른쪽 노란칸: 우리원 정보시스템 운영 관련 법
@@ -280,6 +284,44 @@ def save_config(cfg: Dict[str, Any]):
 
 
 # ============================================================
+# 비밀번호
+# ============================================================
+# 표준 라이브러리의 scrypt를 쓴다. bcrypt/passlib을 새로 깔지 않으려는 것이고,
+# 메모리 하드 함수라 사내 계정 규모에는 충분하다.
+# n=2^14, r=8이면 128*n*r = 16MB — OpenSSL 기본 상한 32MB 안에 들어간다.
+_SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2 ** 14, 8, 1
+
+
+def hash_password(password: str) -> str:
+    """'scrypt$n$r$p$salt$hash' 형태로 만든다.
+
+    파라미터를 해시에 같이 적어 둔다. 나중에 비용을 올려도 기존 계정의
+    비밀번호를 그대로 검증할 수 있어야 하기 때문이다.
+    """
+    salt = secrets.token_bytes(16)
+    dk = hashlib.scrypt(password.encode("utf-8"), salt=salt,
+                        n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32)
+    return (f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}"
+            f"${salt.hex()}${dk.hex()}")
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """저장된 해시와 대조. 형식이 깨졌으면 조용히 False."""
+    try:
+        algo, n, r, p, salt_hex, dk_hex = stored.split("$")
+        if algo != "scrypt":
+            return False
+        dk = bytes.fromhex(dk_hex)
+        calc = hashlib.scrypt(password.encode("utf-8"),
+                             salt=bytes.fromhex(salt_hex),
+                             n=int(n), r=int(r), p=int(p), dklen=len(dk))
+    except (ValueError, TypeError):
+        return False
+    # 타이밍 공격을 막기 위해 == 대신 상수 시간 비교를 쓴다
+    return hmac.compare_digest(calc, dk)
+
+
+# ============================================================
 # 데이터 모델
 # ============================================================
 @dataclass
@@ -410,6 +452,8 @@ class Store:
         await self._schema()
         await self._ensure_columns()
         await self._seed_watchlist()
+        # watchlist가 채워진 뒤라야 기본 부서에 귀속시킬 대상이 존재한다
+        await self._seed_accounts()
 
     async def close(self):
         if self.pool:
@@ -547,6 +591,64 @@ class Store:
                   failed_count INT NOT NULL DEFAULT 0,
                   reason TEXT)""",
 
+            # ── 계정 · 부서 · 구독 ──
+            # watchlist는 '조직 전체가 수집하는 대상'으로 남고, '누가 무엇을
+            # 보는가'는 아래 세 테이블이 담는다. 이 둘을 갈라 두지 않으면 한
+            # 사람의 삭제가 다른 사람의 수집까지 멈춘다.
+            """CREATE TABLE IF NOT EXISTS departments (
+                  id BIGSERIAL PRIMARY KEY,
+                  name VARCHAR(80) NOT NULL,
+                  created_at VARCHAR(32) NOT NULL,
+                  CONSTRAINT uk_dept_name UNIQUE (name))""",
+
+            # dept_id가 NULL일 수 있는 것은 superadmin 때문이다. 전사 관리자는
+            # 특정 부서에 속하지 않는다.
+            # email은 소문자로 정규화해서 넣는다(대소문자만 다른 중복 계정 방지).
+            """CREATE TABLE IF NOT EXISTS users (
+                  id BIGSERIAL PRIMARY KEY,
+                  email VARCHAR(160) NOT NULL,
+                  name VARCHAR(80) NOT NULL DEFAULT '',
+                  password_hash VARCHAR(255) NOT NULL,
+                  dept_id BIGINT REFERENCES departments(id),
+                  role VARCHAR(16) NOT NULL DEFAULT 'member',
+                  enabled SMALLINT NOT NULL DEFAULT 1,
+                  created_at VARCHAR(32) NOT NULL,
+                  last_login VARCHAR(32) NOT NULL DEFAULT '',
+                  CONSTRAINT uk_users_email UNIQUE (email))""",
+
+            # 부서 감시 목록 — dept_admin이 관리한다. enabled=0은 '부서 전체에서
+            # 잠시 빼기'이며, watchlist.enabled(전역 수집 중단)와는 다른 층이다.
+            """CREATE TABLE IF NOT EXISTS dept_watch (
+                  dept_id BIGINT NOT NULL
+                    REFERENCES departments(id) ON DELETE CASCADE,
+                  watch_id BIGINT NOT NULL
+                    REFERENCES watchlist(id) ON DELETE CASCADE,
+                  enabled SMALLINT NOT NULL DEFAULT 1,
+                  added_by BIGINT,
+                  created_at VARCHAR(32) NOT NULL,
+                  PRIMARY KEY (dept_id, watch_id))""",
+
+            # 개인 추가분 — 부서 목록에 없지만 본인 업무에 필요한 법령.
+            # 본인 화면에만 뜨고 부서 목록은 건드리지 않는다.
+            """CREATE TABLE IF NOT EXISTS user_watch_extra (
+                  user_id BIGINT NOT NULL
+                    REFERENCES users(id) ON DELETE CASCADE,
+                  watch_id BIGINT NOT NULL
+                    REFERENCES watchlist(id) ON DELETE CASCADE,
+                  created_at VARCHAR(32) NOT NULL,
+                  PRIMARY KEY (user_id, watch_id))""",
+
+            # 개인 숨김 — 일반 사용자의 '중지' 버튼이 여기에 쌓인다.
+            # 수집은 그대로 돌고 내 화면·알림에서만 빠진다. 이 구분이 없으면
+            # 사원 한 명의 중지가 전사 수집을 멈춰 이력에 구멍이 생긴다.
+            """CREATE TABLE IF NOT EXISTS user_watch_mute (
+                  user_id BIGINT NOT NULL
+                    REFERENCES users(id) ON DELETE CASCADE,
+                  watch_id BIGINT NOT NULL
+                    REFERENCES watchlist(id) ON DELETE CASCADE,
+                  created_at VARCHAR(32) NOT NULL,
+                  PRIMARY KEY (user_id, watch_id))""",
+
             # ── 인덱스 (MySQL판에서 인라인 KEY였던 것) ──
             """CREATE INDEX IF NOT EXISTS idx_lv_enf
                  ON law_versions (law_id, enforce_date_d)""",
@@ -561,6 +663,14 @@ class Store:
                  ON pending_enforcement (status, enforce_date)""",
             """CREATE INDEX IF NOT EXISTS idx_cl_date
                  ON check_log (check_date)""",
+            """CREATE INDEX IF NOT EXISTS idx_users_dept
+                 ON users (dept_id)""",
+            # watch_id 역방향 조회 — PK가 (dept_id, watch_id)라 watch_id만으로는
+            # 못 탄다. 구독자 수 집계(전역 수집을 끌지 판단)가 이 인덱스를 쓴다.
+            """CREATE INDEX IF NOT EXISTS idx_dw_watch
+                 ON dept_watch (watch_id)""",
+            """CREATE INDEX IF NOT EXISTS idx_uwe_watch
+                 ON user_watch_extra (watch_id)""",
         ]:
             await self._exec(stmt)
 
@@ -608,6 +718,181 @@ class Store:
             for name, ministry, category in DEFAULT_WATCHLIST:
                 await self.add_watch(name, ministry=ministry, category=category)
             logger.info(f"감시 대상 기본 {len(DEFAULT_WATCHLIST)}건 등록")
+
+    async def _seed_accounts(self):
+        """부서·계정 부트스트랩. 이미 있으면 아무것도 하지 않는다.
+
+        부서를 처음 만드는 순간에만 기존 watchlist 전체를 그 부서에 귀속시킨다.
+        이 연결이 없으면 계정 기능을 켠 직후 모든 화면이 빈 목록이 된다.
+
+        superadmin 비밀번호는 POLICY_AI_ADMIN_PASSWORD로 주고, 없으면 임의로
+        만들어 로그에 한 번만 찍는다. 고정 기본값('admin' 같은 것)을 심으면
+        아무도 바꾸지 않은 채로 배포된다.
+        """
+        r = await self._fetch("SELECT COUNT(*) FROM departments")
+        if r and r[0][0] == 0:
+            now = datetime.now().isoformat(timespec="seconds")
+            await self._exec(
+                "INSERT INTO departments (name,created_at) VALUES (%s,%s)",
+                (DEFAULT_DEPT_NAME, now))
+            dept_id = (await self._fetch(
+                "SELECT id FROM departments WHERE name=%s",
+                (DEFAULT_DEPT_NAME,)))[0][0]
+            await self._exec(
+                "INSERT INTO dept_watch (dept_id,watch_id,created_at) "
+                "SELECT %s, id, %s FROM watchlist", (dept_id, now))
+            n = (await self._fetch(
+                "SELECT COUNT(*) FROM dept_watch WHERE dept_id=%s",
+                (dept_id,)))[0][0]
+            logger.info(f"기본 부서 '{DEFAULT_DEPT_NAME}' 생성 — "
+                        f"기존 감시 법령 {n}건 귀속")
+
+        r = await self._fetch("SELECT COUNT(*) FROM users")
+        if r and r[0][0] == 0:
+            email = (os.getenv("POLICY_AI_ADMIN_EMAIL")
+                     or "admin@example.com").strip().lower()
+            pw = os.getenv("POLICY_AI_ADMIN_PASSWORD")
+            generated = not pw
+            if generated:
+                pw = secrets.token_urlsafe(12)
+            await self._exec(
+                "INSERT INTO users (email,name,password_hash,dept_id,role,"
+                "created_at) VALUES (%s,%s,%s,NULL,'superadmin',%s)",
+                (email, "전사 관리자", hash_password(pw),
+                 datetime.now().isoformat(timespec="seconds")))
+            logger.info(f"전사 관리자 계정 생성: {email}")
+            if generated:
+                logger.warning(f"  임시 비밀번호: {pw}")
+                logger.warning("  이 값은 다시 표시되지 않는다. "
+                               "로그인 후 즉시 변경할 것.")
+
+    # ---------- 부서 ----------
+    async def list_departments(self) -> List[Dict]:
+        """부서와 소속 인원·감시 법령 수. 관리 화면이 한 번에 필요로 한다."""
+        return [{"id": r[0], "name": r[1], "created_at": r[2] or "",
+                 "user_count": r[3], "watch_count": r[4]}
+                for r in await self._fetch(
+                    "SELECT d.id, d.name, d.created_at,"
+                    "  (SELECT COUNT(*) FROM users u WHERE u.dept_id=d.id),"
+                    "  (SELECT COUNT(*) FROM dept_watch w WHERE w.dept_id=d.id)"
+                    " FROM departments d ORDER BY d.id")]
+
+    async def add_department(self, name: str) -> Optional[int]:
+        """부서 생성. 이름이 겹치면 None."""
+        name = (name or "").strip()
+        if not name:
+            return None
+        if await self._fetch("SELECT 1 FROM departments WHERE name=%s", (name,)):
+            return None
+        await self._exec(
+            "INSERT INTO departments (name,created_at) VALUES (%s,%s)",
+            (name, datetime.now().isoformat(timespec="seconds")))
+        r = await self._fetch("SELECT id FROM departments WHERE name=%s", (name,))
+        return r[0][0] if r else None
+
+    # ---------- 계정 ----------
+    async def get_user_by_email(self, email: str) -> Optional[Dict]:
+        r = await self._fetch(
+            "SELECT id,email,name,password_hash,dept_id,role,enabled "
+            "FROM users WHERE email=%s", ((email or "").strip().lower(),))
+        if not r:
+            return None
+        u = r[0]
+        return {"id": u[0], "email": u[1], "name": u[2] or "",
+                "password_hash": u[3], "dept_id": u[4], "role": u[5],
+                "enabled": bool(u[6])}
+
+    async def add_user(self, email: str, password: str, name: str = "",
+                       dept_id: Optional[int] = None,
+                       role: str = "member") -> Optional[int]:
+        """계정 생성. 이메일이 겹치면 None.
+
+        role 검증은 호출부(API)에서 한다 — 여기서 막으면 어떤 값이 거부됐는지
+        화면에 알려 줄 방법이 없다.
+        """
+        email = (email or "").strip().lower()
+        if not email or not password:
+            return None
+        if await self._fetch("SELECT 1 FROM users WHERE email=%s", (email,)):
+            return None
+        await self._exec(
+            "INSERT INTO users (email,name,password_hash,dept_id,role,"
+            "created_at) VALUES (%s,%s,%s,%s,%s,%s)",
+            (email, name, hash_password(password), dept_id, role,
+             datetime.now().isoformat(timespec="seconds")))
+        r = await self._fetch("SELECT id FROM users WHERE email=%s", (email,))
+        return r[0][0] if r else None
+
+    async def authenticate(self, email: str, password: str) -> Optional[Dict]:
+        """이메일·비밀번호 확인. 실패하면 None (이유는 구분해서 알리지 않는다).
+
+        계정이 없어도 해시 계산을 한 번 돌린다. 응답 시간 차이로 '가입된
+        이메일'을 알아내는 것을 막는다.
+        """
+        u = await self.get_user_by_email(email)
+        if not u:
+            verify_password(password, hash_password("dummy"))
+            return None
+        if not verify_password(password, u["password_hash"]):
+            return None
+        if not u["enabled"]:
+            return None
+        await self._exec("UPDATE users SET last_login=%s WHERE id=%s",
+                         (datetime.now().isoformat(timespec="seconds"), u["id"]))
+        u.pop("password_hash")
+        return u
+
+    async def set_password(self, user_id: int, password: str):
+        await self._exec("UPDATE users SET password_hash=%s WHERE id=%s",
+                         (hash_password(password), user_id))
+
+    # ---------- 구독(부서 목록 · 개인 추가 · 개인 숨김) ----------
+    async def list_user_watch(self, user_id: int) -> List[Dict]:
+        """이 사용자에게 보이는 감시 목록.
+
+            (부서 목록 ∪ 개인 추가) − 개인 숨김
+
+        숨긴 것도 muted=True로 함께 돌려준다. 화면에서 숨김을 되돌리려면
+        목록에 남아 있어야 하기 때문이다. 실제로 가릴지는 호출부가 정한다.
+
+        source는 'dept'(부서 목록)와 'personal'(개인 추가)을 가른다. 일반
+        사용자는 personal만 지울 수 있어서 화면이 이 값을 알아야 한다.
+        부서 목록에서 enabled=0으로 내린 것은 애초에 여기 들어오지 않는다.
+        """
+        rows = await self._fetch(
+            "SELECT w.id, w.name, w.enabled, COALESCE(w.ministry,''),"
+            "       COALESCE(w.category,''), COALESCE(w.law_id,''),"
+            "       COALESCE(w.status,'pending'), COALESCE(w.last_updated,''),"
+            "       CASE WHEN dw.watch_id IS NULL THEN 'personal' ELSE 'dept' END,"
+            "       CASE WHEN m.watch_id IS NULL THEN 0 ELSE 1 END"
+            "  FROM watchlist w"
+            "  LEFT JOIN dept_watch dw"
+            "    ON dw.watch_id = w.id AND dw.enabled = 1"
+            "   AND dw.dept_id = (SELECT dept_id FROM users WHERE id = %s)"
+            "  LEFT JOIN user_watch_extra ux"
+            "    ON ux.watch_id = w.id AND ux.user_id = %s"
+            "  LEFT JOIN user_watch_mute m"
+            "    ON m.watch_id = w.id AND m.user_id = %s"
+            " WHERE dw.watch_id IS NOT NULL OR ux.watch_id IS NOT NULL"
+            " ORDER BY w.id", (user_id, user_id, user_id))
+        return [{"id": r[0], "name": r[1], "enabled": bool(r[2]),
+                 "ministry": r[3], "category": r[4], "law_id": r[5],
+                 "status": r[6], "last_updated": r[7],
+                 "source": r[8], "muted": bool(r[9])} for r in rows]
+
+    async def watch_subscriber_count(self, watch_id: int) -> int:
+        """이 법령을 목록에 걸어 둔 부서 + 개인의 수.
+
+        0이면 아무도 안 보므로 전역 수집을 내려도 된다. 부서 목록에서 지울 때
+        이 값을 확인하지 않으면, 한 부서의 삭제가 다른 부서의 수집까지 끊는다.
+        enabled=0으로 내려 둔 부서도 센다 — 다시 켤 때 이력이 비어 있으면
+        곤란하기 때문이다.
+        """
+        r = await self._fetch(
+            "SELECT (SELECT COUNT(*) FROM dept_watch WHERE watch_id=%s)"
+            "     + (SELECT COUNT(*) FROM user_watch_extra WHERE watch_id=%s)",
+            (watch_id, watch_id))
+        return int(r[0][0]) if r else 0
 
     # ---------- watchlist ----------
     async def list_watch(self, only_enabled: bool = False) -> List[Dict]:
