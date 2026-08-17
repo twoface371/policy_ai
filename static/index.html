@@ -1246,7 +1246,9 @@ async function loadAccounts() {
       (su && u.role !== 'superadmin' ? `
       <button class="b g" style="padding:3px 8px;font-size:12px"
         onclick="moveUser(${u.id},'${esc(u.email)}',${u.dept_id})"
-        >부서 이동</button>` : '')}</td>
+        >부서 이동</button>` : '') + `
+      <button class="b g" style="padding:3px 8px;font-size:12px;color:#9E1B32"
+        onclick="delUser(${u.id},'${esc(u.email)}')">삭제</button>`}</td>
     </tr>`).join('') || '<tr><td colspan="7" class="muted">계정이 없습니다.</td></tr>';
 }
 
@@ -1345,6 +1347,26 @@ async function moveUser(id, email, curDept) {
     loadAccounts();
     notify('부서를 옮겼습니다', `${esc(r.email)} → <b>${esc(r.dept_name)}</b>`);
   } catch (e) { notify('옮기지 못했습니다', esc(e.message), true); }
+}
+
+// 계정 삭제 — 정지와 달리 되돌릴 수 없다. 무엇이 사라지는지 먼저 알린다.
+async function delUser(id, email) {
+  if (!await confirmM(`${email} 계정 삭제`,
+    '<b>되돌릴 수 없습니다.</b><br><br>'
+    + '· 이 사람이 개인으로 추가한 법령이 목록에서 빠집니다. 아무도 보지 않게 된 '
+    + '법령은 수집이 멈춥니다(전문·이력·분석은 남습니다).<br>'
+    + '· 이 사람이 올린 문서 검사 결과는 파일로 남지만 <b>아무도 열 수 없게</b> 됩니다.<br>'
+    + '· 부서 감시 목록과 다른 사람의 목록은 영향받지 않습니다.<br><br>'
+    + '퇴사·휴직이라면 <b>정지</b>가 낫습니다 — 되돌릴 수 있고 기록이 남습니다.',
+    '삭제', true)) return;
+  try {
+    const r = await api(`/api/admin/users/${id}`, {method:'DELETE'});
+    loadAccounts(); loadStats();
+    notify('계정을 지웠습니다',
+      `${esc(r.email)}<br>`
+      + (r.collection_stopped ? `수집 중단 ${r.collection_stopped}건(자료는 보존)<br>` : '')
+      + (r.orphaned_checks ? `열 수 없게 된 검사 결과 ${r.orphaned_checks}건` : ''));
+  } catch (e) { notify('지우지 못했습니다', esc(e.message), true); }
 }
 
 async function resetPw(id, email) {

@@ -397,6 +397,53 @@ async def api_user_toggle(uid: int, body: Dict = Body(...),
     return {"ok": True, "email": target["email"], "enabled": enabled}
 
 
+def _count_check_files(user_id: int) -> int:
+    """이 사람이 올린 문서 검사 결과 파일 수. 삭제 안내에 숫자를 보여주려는 것이다."""
+    if not CHECKS_DIR.exists():
+        return 0
+    n = 0
+    for p in CHECKS_DIR.glob("*.json"):
+        try:
+            if json.loads(p.read_text(encoding="utf-8")).get("소유자") == user_id:
+                n += 1
+        except (OSError, ValueError):
+            continue
+    return n
+
+
+@api.delete("/api/admin/users/{uid}")
+async def api_user_del(uid: int, actor: Dict = Depends(dept_admin_only)):
+    """계정 삭제. 되돌릴 수 없다.
+
+    퇴사·휴직은 보통 정지(toggle)로 처리하는 편이 낫다. 정지는 되돌릴 수
+    있고 그 사람이 남긴 것이 그대로 남는다. 삭제는 개인 추가분과 숨김이
+    함께 사라지고, 문서 검사 결과는 파일로 남지만 소유자가 없어져 아무도
+    열 수 없게 된다.
+
+    마지막 전사 관리자는 지우지 않는다. 지우면 설정·전역 관리에 아무도
+    들어갈 수 없는 잠김 상태가 된다.
+    """
+    target = await store().get_user(uid)
+    if not target:
+        raise HTTPException(404, "해당 계정이 없습니다")
+    if target["id"] == actor["id"]:
+        raise HTTPException(400, "자기 계정은 지울 수 없습니다")
+    _may_manage(actor, target)
+    # 지운 뒤 로그인 가능한 전사 관리자가 하나도 안 남는 경우만 막는다.
+    # 정지된 관리자는 애초에 세지 않으므로, 그 계정을 지우는 것은 잠김을
+    # 만들지 않는다 — 여기서 막으면 정리 작업이 불필요하게 걸린다.
+    if target["role"] == "superadmin" and target["enabled"]:
+        if await store().count_superadmins() <= 1:
+            raise HTTPException(
+                409, "로그인 가능한 마지막 전사 관리자입니다. "
+                     "다른 전사 관리자를 먼저 만드세요.")
+
+    checks = _count_check_files(uid)
+    stopped = await store().delete_user(uid)
+    return {"ok": True, "email": target["email"],
+            "collection_stopped": len(stopped), "orphaned_checks": checks}
+
+
 @api.post("/api/admin/users/{uid}/password")
 async def api_user_reset_password(uid: int, body: Dict = Body(...),
                                   actor: Dict = Depends(dept_admin_only)):

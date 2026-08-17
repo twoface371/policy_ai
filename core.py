@@ -772,10 +772,19 @@ class Store:
             logger.info(f"기본 부서 '{DEFAULT_DEPT_NAME}' 생성 — "
                         f"기존 감시 법령 {n}건 귀속")
 
-        r = await self._fetch("SELECT COUNT(*) FROM users")
-        if r and r[0][0] == 0:
+        # '계정이 하나도 없을 때'가 아니라 '로그인 가능한 전사 관리자가 없을
+        # 때' 만든다. 일반 계정만 남고 전사 관리자가 사라지면(삭제·정지)
+        # 아무도 관리에 들어갈 수 없는 잠김 상태가 되는데, 계정 수로 판단하면
+        # 그 상태에서 부트스트랩이 돌지 않는다.
+        if await self.count_superadmins() == 0:
             email = (os.getenv("POLICY_AI_ADMIN_EMAIL")
                      or "admin@example.com").strip().lower()
+            if await self.get_user_by_email(email):
+                logger.error(
+                    f"로그인 가능한 전사 관리자가 없는데 {email} 은 이미 있다. "
+                    "POLICY_AI_ADMIN_EMAIL로 다른 주소를 지정하거나 "
+                    "그 계정의 정지를 풀 것.")
+                return
             pw = os.getenv("POLICY_AI_ADMIN_PASSWORD")
             generated = not pw
             if generated:
@@ -959,6 +968,33 @@ class Store:
                  "created_at": r[6] or "", "last_login": r[7] or "",
                  "dept_name": r[8]}
                 for r in await self._fetch(sql, params)]
+
+    async def count_superadmins(self) -> int:
+        r = await self._fetch(
+            "SELECT COUNT(*) FROM users WHERE role='superadmin' AND enabled=1")
+        return int(r[0][0]) if r else 0
+
+    async def delete_user(self, user_id: int) -> List[int]:
+        """계정을 지우고, 수집이 멈춘 법령의 watch_id들을 돌려준다.
+
+        세션·개인 추가분·개인 숨김은 FK CASCADE로 함께 사라진다. 개인
+        추가분은 구독이므로, 지우기 전에 watch_id를 모아 두었다가 삭제 후
+        구독자를 다시 세야 한다 — 그 사람이 마지막 구독자였던 법령을 계속
+        수집하는 유령이 남지 않게 한다.
+
+        문서 검사 결과 파일은 건드리지 않는다. 여기서는 DB만 다루고,
+        디스크에 남은 결과는 소유자가 사라져 아무에게도 보이지 않는다.
+        """
+        watch_ids = [r[0] for r in await self._fetch(
+            "SELECT watch_id FROM user_watch_extra WHERE user_id=%s", (user_id,))]
+        await self._exec("DELETE FROM users WHERE id=%s", (user_id,))
+        stopped = []
+        for wid in watch_ids:
+            if await self.watch_subscriber_count(wid) == 0:
+                await self._exec("UPDATE watchlist SET enabled=0 WHERE id=%s",
+                                 (wid,))
+                stopped.append(wid)
+        return stopped
 
     async def set_user_enabled(self, user_id: int, enabled: bool):
         """계정 정지/해제. 정지하면 열려 있던 세션도 함께 끊는다.
