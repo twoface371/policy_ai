@@ -1638,6 +1638,33 @@ def api_check_get(cid: str, request: Request):
     return _load_check(cid, current_user(request))
 
 
+@api.delete("/api/checks/{cid}")
+def api_check_del(cid: str, request: Request):
+    """검사 결과 삭제. 본인 것만.
+
+    파일을 실제로 지운다. 사내 문서를 검사한 결과라 계속 쌓아 둘 이유가
+    없고, 소유자만 떼어 남기면 아무도 못 여는 파일이 디스크에 남는다.
+
+    _load_check가 소유권을 확인하므로 남의 것이면 여기 오기 전에 404가 난다.
+
+    진행 여부는 메모리로만 판단한다. 파일은 완료된 검사만 저장되므로 파일이
+    있다는 것 자체가 완료라는 뜻이고, 예전에 저장된 결과에는 '상태' 키가
+    아예 없어서 저장값으로 판단하면 멀쩡한 결과를 못 지운다.
+    """
+    d = _load_check(cid, current_user(request))
+    live = STATE["checks"].get(cid)
+    if live and live.get("상태") not in ("완료", "실패"):
+        raise HTTPException(409, "진행 중인 검사는 지울 수 없습니다")
+    # 실패한 검사는 파일이 없다(완료분만 저장한다). 그때는 메모리에서만 치운다.
+    p = CHECKS_DIR / f"{cid}.json"
+    try:
+        p.unlink(missing_ok=True)
+    except OSError as e:
+        raise HTTPException(500, f"삭제하지 못했습니다: {e}")
+    STATE["checks"].pop(cid, None)
+    return {"ok": True, "파일명": d.get("파일명", "")}
+
+
 @api.get("/api/checks/{cid}/download/{fmt}")
 def api_check_download(cid: str, fmt: str, request: Request):
     """저장된 검사 결과를 마크다운 / PDF로 내려준다."""

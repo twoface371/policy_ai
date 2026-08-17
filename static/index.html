@@ -261,7 +261,10 @@ del.df-del{background:#fadcdc;color:#932626;text-decoration:line-through;
         <b id="chk-title" style="flex:1"></b>
         <button class="b g" id="dl-md">마크다운 내려받기</button>
         <button class="b g" id="dl-pdf">PDF 내려받기</button>
+        <button class="b g" id="chk-fold" title="결과를 접습니다"
+          style="min-width:34px">▲</button>
       </div>
+      <div id="chk-body">
       <div class="cards" id="chk-cards"></div>
       <div id="chk-badrows"></div>
       <h2>검토가 필요한 인용</h2>
@@ -280,6 +283,7 @@ del.df-del{background:#fadcdc;color:#932626;text-decoration:line-through;
           <th style="width:130px">조문</th><th>문맥</th></tr></thead>
         <tbody id="chk-all"></tbody>
       </table>
+      </div><!-- /chk-body -->
     </div>
     <div class="panel">
       <h2>최근 검사</h2>
@@ -287,7 +291,8 @@ del.df-del{background:#fadcdc;color:#932626;text-decoration:line-through;
       <table>
         <thead><tr><th style="width:150px">검사 일시</th><th>문서</th>
           <th style="width:80px">인용</th><th style="width:80px">개정됨</th>
-          <th style="width:90px">조항 없음</th><th style="width:90px"></th></tr></thead>
+          <th style="width:90px">조항 없음</th>
+          <th style="width:120px"></th></tr></thead>
         <tbody id="chk-history"></tbody>
       </table>
     </div>
@@ -923,9 +928,26 @@ async function loadChecks() {
       <td>${s.개정됨 ? `<span class="tag t-check">${s.개정됨}</span>` : '<span class="muted">0</span>'}</td>
       <td>${s.조항없음 ? `<span class="tag t-restrict">${s.조항없음}</span>` : '<span class="muted">0</span>'}</td>
       <td><button class="b" style="padding:4px 10px;font-size:12px"
-        onclick="openCheck('${esc(it.검사ID)}')">열기</button></td>
+        onclick="openCheck('${esc(it.검사ID)}')">열기</button>
+        <button class="b g" style="padding:4px 9px;font-size:12px;color:#9E1B32"
+        title="이 검사 결과를 지웁니다"
+        onclick="delCheck('${esc(it.검사ID)}','${esc(it.파일명)}')">✕</button></td>
       </tr>`;
   }).join('') || '<tr><td colspan="6" class="muted">저장된 검사가 없습니다.</td></tr>';
+}
+
+// 검사 결과 삭제 — 파일을 실제로 지운다. 되돌릴 수 없다.
+async function delCheck(cid, name) {
+  if (!await confirmM(`검사 결과 삭제`,
+    `<b>${esc(name)}</b>의 검사 결과를 지웁니다.<br>`
+    + '되돌릴 수 없습니다. 원본 문서는 서버에 보관하지 않으므로, '
+    + '다시 보려면 문서를 다시 올려 검사해야 합니다.', '삭제', true)) return;
+  try {
+    await api('/api/checks/' + encodeURIComponent(cid), {method:'DELETE'});
+    // 지운 결과가 열려 있었다면 화면에서도 치운다
+    if ($('#chk-title').dataset.cid === cid) $('#chk-result').classList.add('hide');
+    loadChecks();
+  } catch (e) { notify('지우지 못했습니다', esc(e.message), true); }
 }
 
 // 개정 시점 칸. 기준일 검사에서는 '구간 + 개정 횟수'가 답이다 — 판본 하나를
@@ -972,10 +994,23 @@ function renderDiffs(d) {
       </details>`).join('');
 }
 
+// 결과 접기 — 결과 패널이 최근 검사 목록 위에 있어서, 펼친 채로 두면 다음
+// 항목을 누르려고 매번 결과 전체를 지나 스크롤해야 한다.
+function foldCheck(fold) {
+  $('#chk-body').classList.toggle('hide', fold);
+  const b = $('#chk-fold');
+  b.textContent = fold ? '▼' : '▲';
+  b.title = fold ? '결과를 펼칩니다' : '결과를 접습니다';
+}
+$('#chk-fold').onclick = () => foldCheck(!$('#chk-body').classList.contains('hide'));
+
 async function openCheck(cid) {
   try {
     renderCheck(await api('/api/checks/' + cid));
     $('#chk-msg').textContent = '';
+    // 접어 둔 상태에서 다른 결과를 누르면 펼쳐 준다 — 눌렀는데 아무 반응이
+    // 없는 것처럼 보이면 안 된다.
+    foldCheck(false);
     $('#chk-result').scrollIntoView({block: 'start'});
   } catch (e) { $('#chk-msg').textContent = '불러오기 실패: ' + e.message; }
 }
@@ -985,6 +1020,8 @@ function renderCheck(d) {
   // 저장된 결과라야 내려받을 수 있다 — 검사ID가 곧 서버에 남은 파일이다.
   $('#chk-title').textContent =
     `${d.파일명 || ''}${d.검사일시 ? ' · ' + d.검사일시 : ''}`;
+  // 지금 열려 있는 결과가 무엇인지 — 그것을 삭제하면 화면에서도 치워야 한다
+  $('#chk-title').dataset.cid = d.검사ID || '';
   for (const fmt of ['md', 'pdf']) {
     const b = $('#dl-' + fmt);
     b.disabled = !d.검사ID;
