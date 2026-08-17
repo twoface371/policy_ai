@@ -1235,20 +1235,7 @@ async function loadAccounts() {
     <td class="muted">${esc(u.last_login ? u.last_login.slice(0,16).replace('T',' ') : '없음')}</td>
     <td>${u.enabled ? '<span class="tag t-relax">사용</span>'
                     : '<span class="tag t-restrict">정지</span>'}</td>
-    <td>${u.id === ME.id ? '<span class="muted" style="font-size:12px">본인</span>' : `
-      <button class="b g" style="padding:3px 8px;font-size:12px"
-        onclick="toggleUser(${u.id},${!u.enabled},'${esc(u.email)}')"
-        >${u.enabled ? '정지' : '해제'}</button>
-      <button class="b g" style="padding:3px 8px;font-size:12px"
-        onclick="resetPw(${u.id},'${esc(u.email)}')">비번 재설정</button>` +
-      // 부서 이동은 전사 관리자만 — 부서 관리자에게 열어 주면 남의 부서에서
-      // 사람을 끌어올 수 있다. 전사 관리자 계정은 애초에 소속이 없다.
-      (su && u.role !== 'superadmin' ? `
-      <button class="b g" style="padding:3px 8px;font-size:12px"
-        onclick="moveUser(${u.id},'${esc(u.email)}',${u.dept_id})"
-        >부서 이동</button>` : '') + `
-      <button class="b g" style="padding:3px 8px;font-size:12px;color:#9E1B32"
-        onclick="delUser(${u.id},'${esc(u.email)}')">삭제</button>`}</td>
+    <td>${userButtons(u, su)}</td>
     </tr>`).join('') || '<tr><td colspan="7" class="muted">계정이 없습니다.</td></tr>';
 }
 
@@ -1347,6 +1334,51 @@ async function moveUser(id, email, curDept) {
     loadAccounts();
     notify('부서를 옮겼습니다', `${esc(r.email)} → <b>${esc(r.dept_name)}</b>`);
   } catch (e) { notify('옮기지 못했습니다', esc(e.message), true); }
+}
+
+// 계정 행의 버튼. 삼항을 템플릿 안에 겹쳐 쓰면 읽기도 고치기도 어려워서
+// 따로 뺀다.
+//
+// 자기 계정은 정지·삭제·부서 이동을 할 수 없다(잠기거나 되돌릴 수 없다).
+// 이메일 변경만 남긴다 — 그건 위험하지 않고, 없으면 전사 관리자가 자기
+// 주소를 바꿀 방법이 아예 없다.
+// 부서 이동은 전사 관리자만. 부서 관리자에게 열어 주면 남의 부서에서
+// 사람을 끌어올 수 있다. 전사 관리자 계정은 애초에 소속이 없다.
+function userButtons(u, su) {
+  const b = (label, call, style = '') =>
+    `<button class="b g" style="padding:3px 8px;font-size:12px;${style}"
+       onclick="${call}">${label}</button>`;
+  const mail = esc(u.email);
+  const out = [b('이메일 변경', `changeEmail(${u.id},'${mail}')`)];
+  if (u.id === ME.id) {
+    out.push('<span class="muted" style="font-size:12px"> 본인</span>');
+    return out.join(' ');
+  }
+  out.push(b(u.enabled ? '정지' : '해제',
+             `toggleUser(${u.id},${!u.enabled},'${mail}')`));
+  out.push(b('비번 재설정', `resetPw(${u.id},'${mail}')`));
+  if (su && u.role !== 'superadmin')
+    out.push(b('부서 이동', `moveUser(${u.id},'${mail}',${u.dept_id})`));
+  out.push(b('삭제', `delUser(${u.id},'${mail}')`, 'color:#9E1B32'));
+  return out.join(' ');
+}
+
+// 로그인 이메일 변경 — 자기 계정도 가능하다.
+async function changeEmail(id, cur) {
+  const v = await ask({
+    title: '이메일 변경', ok: '변경',
+    desc: '로그인에 쓰는 주소가 바뀝니다.<br>'
+        + '열려 있는 세션은 유지되지만, 다음 로그인부터는 새 주소를 써야 합니다.',
+    fields: [{id:'email', label:'새 이메일', value: cur}]});
+  if (!v || v.email.trim().toLowerCase() === cur) return;
+  try {
+    const r = await jpost(`/api/admin/users/${id}/email`, {email: v.email});
+    loadAccounts();
+    if (id === ME.id) loadMe();
+    notify('이메일을 바꿨습니다',
+      `${esc(r.old)} → <b>${esc(r.email)}</b>` +
+      (id === ME.id ? '<br>다음 로그인부터 새 주소를 쓰세요.' : ''));
+  } catch (e) { notify('바꾸지 못했습니다', esc(e.message), true); }
 }
 
 // 계정 삭제 — 정지와 달리 되돌릴 수 없다. 무엇이 사라지는지 먼저 알린다.

@@ -397,6 +397,33 @@ async def api_user_toggle(uid: int, body: Dict = Body(...),
     return {"ok": True, "email": target["email"], "enabled": enabled}
 
 
+# 로그인 아이디로 쓰는 값이라 최소한의 꼴만 확인한다. 사내 계정이라
+# 도메인을 제한하지 않고, 실제 수신 가능 여부도 여기서는 따지지 않는다.
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+@api.post("/api/admin/users/{uid}/email")
+async def api_user_email(uid: int, body: Dict = Body(...),
+                         actor: Dict = Depends(dept_admin_only)):
+    """로그인 이메일 변경.
+
+    자기 계정도 바꿀 수 있다 — 자기 계정 정지·삭제와 달리 잠김을 만들지
+    않는다. 세션은 user_id로 걸려 있어 끊지 않는다.
+    """
+    target = await store().get_user(uid)
+    if not target:
+        raise HTTPException(404, "해당 계정이 없습니다")
+    _may_manage(actor, target)
+    email = (body.get("email") or "").strip().lower()
+    if not EMAIL_RE.match(email):
+        raise HTTPException(400, "이메일 형식이 올바르지 않습니다")
+    if email == target["email"]:
+        raise HTTPException(409, "지금과 같은 이메일입니다")
+    if not await store().set_user_email(uid, email):
+        raise HTTPException(409, "다른 계정이 쓰는 이메일입니다")
+    return {"ok": True, "old": target["email"], "email": email}
+
+
 def _count_check_files(user_id: int) -> int:
     """이 사람이 올린 문서 검사 결과 파일 수. 삭제 안내에 숫자를 보여주려는 것이다."""
     if not CHECKS_DIR.exists():

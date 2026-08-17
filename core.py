@@ -996,6 +996,23 @@ class Store:
                 stopped.append(wid)
         return stopped
 
+    async def set_user_email(self, user_id: int, email: str) -> bool:
+        """로그인 이메일 변경. 다른 계정이 쓰는 주소면 False.
+
+        세션은 건드리지 않는다. 세션은 이메일이 아니라 user_id로 걸려 있어
+        끊을 이유가 없고, 비밀번호 변경과 달리 유출을 의심해 바꾸는 일도
+        아니다.
+        """
+        email = (email or "").strip().lower()
+        if not email:
+            return False
+        if await self._fetch("SELECT 1 FROM users WHERE email=%s AND id<>%s",
+                             (email, user_id)):
+            return False
+        await self._exec("UPDATE users SET email=%s WHERE id=%s",
+                         (email, user_id))
+        return True
+
     async def set_user_enabled(self, user_id: int, enabled: bool):
         """계정 정지/해제. 정지하면 열려 있던 세션도 함께 끊는다.
 
