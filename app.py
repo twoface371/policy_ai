@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any
 from urllib.parse import quote
 
-from fastapi import (FastAPI, HTTPException, Query, Body, File, Form,
+from fastapi import (FastAPI, HTTPException, Query, Body, Depends, File, Form,
                      Request, UploadFile)
 from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
                                Response, FileResponse)
@@ -138,6 +138,36 @@ def current_user(request: Request) -> Dict:
     if not user:
         raise HTTPException(401, "로그인이 필요합니다")
     return user
+
+
+# 등급은 포함 관계다 — 위 등급은 아래 등급이 하는 일을 전부 할 수 있다.
+ROLE_RANK = {"member": 0, "dept_admin": 1, "superadmin": 2}
+
+
+def require(min_role: str):
+    """이 등급 이상만 통과시키는 의존성을 만든다.
+
+    미들웨어가 '로그인했는가'를 이미 보장하므로 여기서는 등급만 본다.
+    등급 제한이 필요한 엔드포인트에 하나씩 붙인다 — 관리 기능은 수가 적고
+    잘 늘지 않아서, 경로 패턴을 미들웨어에 모아 두는 것보다 각 엔드포인트에
+    적혀 있는 편이 읽기 쉽다. 관리 엔드포인트를 새로 만들면 이걸 붙일 것.
+    """
+    need = ROLE_RANK[min_role]
+
+    def dep(request: Request) -> Dict:
+        user = current_user(request)
+        if ROLE_RANK.get(user["role"], -1) < need:
+            raise HTTPException(403, "권한이 없습니다")
+        return user
+
+    return dep
+
+
+# 부서 감시 목록을 만지는 일 — 부서 관리자 이상
+dept_admin_only = require("dept_admin")
+# 전사에 영향을 주거나(전역 수집·전문 삭제), 돈이 나가거나(LLM 재분석),
+# 키를 다루는 일 — 전사 관리자만
+super_only = require("superadmin")
 
 
 @api.post("/api/auth/login")
@@ -744,8 +774,11 @@ async def api_report_one(mst: str, fmt: str):
 # 수동 개정 확인 — 스케줄러를 기다리지 않고 지금 한 번 돌린다
 # ============================================================
 @api.post("/api/check-now")
-async def api_check_now():
+async def api_check_now(_: Dict = Depends(super_only)):
     """매일 도는 판본 대조를 지금 실행한다. (개발 중 데이터를 쌓을 때)
+
+    전사 공용 작업이라 전사 관리자만 부른다. 법제처를 대량으로 두드리고
+    job 락을 몇 분 잡으므로, 아무나 부르면 매일 도는 적재가 밀린다.
 
     감시 법령을 전부 순회하며 법제처를 호출하므로 수 분 걸린다. 요청을 붙잡고
     있으면 타임아웃이 나므로 백그라운드로 띄우고 즉시 반환한다.
@@ -768,7 +801,8 @@ async def api_check_now():
 # 감시 법령 관리
 # ============================================================
 @api.post("/api/watchlist")
-async def api_watch_add(body: Dict = Body(...)):
+async def api_watch_add(body: Dict = Body(...),
+                        _: Dict = Depends(dept_admin_only)):
     """감시 법령 추가. 전문은 다음 자동 적재(또는 서버 재시작) 때 수집된다."""
     name = (body.get("name") or "").strip()
     if not name:
@@ -785,8 +819,14 @@ async def api_watch_add(body: Dict = Body(...)):
 
 
 @api.post("/api/watchlist/{wid}/toggle")
-async def api_watch_toggle(wid: int, body: Dict = Body(...)):
-    """감시 사용/중지. 껐다고 지워지는 것은 없고, 수집·점검 대상에서만 빠진다."""
+async def api_watch_toggle(wid: int, body: Dict = Body(...),
+                           _: Dict = Depends(super_only)):
+    """감시 사용/중지. 껐다고 지워지는 것은 없고, 수집·점검 대상에서만 빠진다.
+
+    이것은 '전역 수집 중단'이라 지금은 전사 관리자로 묶어 둔다. 일반
+    사용자의 중지(개인 숨김)와 부서 단위 중지는 별개의 층이며, 구독
+    분리 단계에서 각자의 엔드포인트를 갖는다.
+    """
     w = await store().get_watch(wid)
     if not w:
         raise HTTPException(404, "해당 감시 항목이 없습니다")
@@ -796,7 +836,7 @@ async def api_watch_toggle(wid: int, body: Dict = Body(...)):
 
 
 @api.get("/api/watchlist/{wid}/data")
-async def api_watch_data(wid: int):
+async def api_watch_data(wid: int, _: Dict = Depends(dept_admin_only)):
     """이 감시 항목에 딸린 데이터 규모. 삭제 확인창이 숫자를 보여주려고 부른다."""
     w = await store().get_watch(wid)
     if not w:
@@ -805,8 +845,13 @@ async def api_watch_data(wid: int):
 
 
 @api.delete("/api/watchlist/{wid}")
-async def api_watch_del(wid: int, purge: bool = False):
+async def api_watch_del(wid: int, purge: bool = False,
+                        _: Dict = Depends(super_only)):
     """감시 목록에서 제거. purge=true면 수집된 전문·판본·조항·부칙까지 지운다.
+
+    지금은 watchlist 행을 통째로 지워 모든 부서·개인의 구독까지 함께
+    끊는다(FK가 CASCADE다). 그래서 전사 관리자로 묶어 둔다. 부서 관리자가
+    '우리 부서 목록에서만 빼는' 경로는 구독 분리 단계에서 따로 만든다.
 
     purge를 켜도 개정 이력(law_changes)과 분석 결과(analyses)는 남긴다.
     재수집으로 복구되지 않는 자산이고, AI 분석은 실제 비용이 들어간 결과다.
@@ -823,7 +868,7 @@ async def api_watch_del(wid: int, purge: bool = False):
 
 
 @api.delete("/api/fulltext/{law_id}")
-async def api_fulltext_del(law_id: str):
+async def api_fulltext_del(law_id: str, _: Dict = Depends(super_only)):
     """전문·판본·조항호목·부칙을 지우고 상태를 pending으로 되돌린다 → 다음 수집 때
     다시 받아온다. 삭제가 목적이 아니라 '강제 재수집'이 목적인 경로다.
 
@@ -847,7 +892,7 @@ def _mask(s: str) -> str:
 
 
 @api.get("/api/config")
-async def api_config_get():
+async def api_config_get(_: Dict = Depends(super_only)):
     c = cfg()
     llm = c.get("llm", {})
     return {"law_api_key_set": bool(c.get("law_api_key")),
@@ -861,7 +906,8 @@ async def api_config_get():
 
 
 @api.post("/api/config")
-async def api_config_set(body: Dict = Body(...)):
+async def api_config_set(body: Dict = Body(...),
+                         _: Dict = Depends(super_only)):
     """키·모델을 config.json에 저장하고 즉시 반영. 키를 비워 보내면 기존 값 유지."""
     c = cfg()
     if body.get("law_api_key"):
@@ -892,8 +938,10 @@ async def api_config_set(body: Dict = Body(...)):
 
 
 @api.post("/api/reanalyze")
-async def api_reanalyze():
+async def api_reanalyze(_: Dict = Depends(super_only)):
     """규칙 기반으로만 분석된 건을 지금 AI로 다시 분석한다.
+
+    실제로 과금되는 호출이라 전사 관리자만 부른다.
 
     AI 키를 나중에 넣은 경우를 위한 것이다. 모델명이 그대로면 content_hash도
     그대로라 평소 경로로는 캐시에 막혀 재분석이 돌지 않는다.
