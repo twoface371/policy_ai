@@ -815,7 +815,40 @@ class Store:
         r = await self._fetch("SELECT id FROM departments WHERE name=%s", (name,))
         return r[0][0] if r else None
 
+    async def get_department(self, dept_id: int) -> Optional[Dict]:
+        r = await self._fetch("SELECT id,name FROM departments WHERE id=%s",
+                              (dept_id,))
+        return {"id": r[0][0], "name": r[0][1]} if r else None
+
+    async def rename_department(self, dept_id: int, name: str) -> bool:
+        """부서 이름 변경. 다른 부서가 쓰는 이름이면 False.
+
+        소속은 dept_id로 걸려 있어 이름을 바꿔도 인원·감시 목록은 그대로다.
+        """
+        name = (name or "").strip()
+        if not name:
+            return False
+        if await self._fetch(
+                "SELECT 1 FROM departments WHERE name=%s AND id<>%s",
+                (name, dept_id)):
+            return False
+        await self._exec("UPDATE departments SET name=%s WHERE id=%s",
+                         (name, dept_id))
+        return True
+
     # ---------- 계정 ----------
+    async def set_user_dept(self, user_id: int, dept_id: int):
+        """인원을 다른 부서로 옮긴다.
+
+        개인 숨김은 지운다. 이전 부서 목록을 보고 숨겨 둔 것이라, 새 부서에
+        같은 법령이 있으면 처음부터 안 보이는 채로 나타나 고장처럼 보인다.
+        개인 추가분(user_watch_extra)은 본인 관심사이므로 그대로 따라간다.
+        """
+        await self._exec("UPDATE users SET dept_id=%s WHERE id=%s",
+                         (dept_id, user_id))
+        await self._exec("DELETE FROM user_watch_mute WHERE user_id=%s",
+                         (user_id,))
+
     async def get_user_by_email(self, email: str) -> Optional[Dict]:
         r = await self._fetch(
             "SELECT id,email,name,password_hash,dept_id,role,enabled "

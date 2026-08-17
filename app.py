@@ -245,6 +245,49 @@ async def api_dept_add(body: Dict = Body(...), _: Dict = Depends(super_only)):
     return {"ok": True, "id": dept_id}
 
 
+@api.post("/api/admin/departments/{did}/rename")
+async def api_dept_rename(did: int, body: Dict = Body(...),
+                          _: Dict = Depends(super_only)):
+    """부서 이름 변경. 소속은 id로 걸려 있어 인원·감시 목록은 그대로 남는다."""
+    if not await store().get_department(did):
+        raise HTTPException(404, "해당 부서가 없습니다")
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "부서 이름을 입력하세요")
+    if not await store().rename_department(did, name):
+        raise HTTPException(409, "같은 이름의 부서가 이미 있습니다")
+    return {"ok": True, "name": name}
+
+
+@api.post("/api/admin/users/{uid}/dept")
+async def api_user_move(uid: int, body: Dict = Body(...),
+                        _: Dict = Depends(super_only)):
+    """인원을 다른 부서로 옮긴다.
+
+    부서 관리자에게는 열어 주지 않는다 — 열어 주면 남의 부서에서 사람을
+    끌어올 수 있다.
+
+    옮기면 그 사람의 감시 목록은 새 부서의 것으로 바뀐다. 개인 추가분은
+    따라가고, 개인 숨김은 지워진다(이전 부서 목록 기준이라 그대로 두면
+    새 부서의 법령이 처음부터 안 보이는 채로 나타난다).
+    """
+    target = await store().get_user(uid)
+    if not target:
+        raise HTTPException(404, "해당 계정이 없습니다")
+    if target["role"] == "superadmin":
+        raise HTTPException(400, "전사 관리자는 부서에 속하지 않습니다")
+    dept_id = body.get("dept_id")
+    if not dept_id:
+        raise HTTPException(400, "옮길 부서를 지정하세요")
+    dept = await store().get_department(dept_id)
+    if not dept:
+        raise HTTPException(404, "해당 부서가 없습니다")
+    if target["dept_id"] == dept_id:
+        raise HTTPException(409, "이미 그 부서 소속입니다")
+    await store().set_user_dept(uid, dept_id)
+    return {"ok": True, "email": target["email"], "dept_name": dept["name"]}
+
+
 @api.get("/api/admin/users")
 async def api_user_list(request: Request,
                         user: Dict = Depends(dept_admin_only)):
