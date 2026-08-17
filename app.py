@@ -29,8 +29,9 @@ from typing import List, Dict, Any
 from urllib.parse import quote
 
 from fastapi import (FastAPI, HTTPException, Query, Body, File, Form,
-                     UploadFile)
-from fastapi.responses import HTMLResponse, Response, FileResponse
+                     Request, UploadFile)
+from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
+                               Response, FileResponse)
 
 import analyzer
 import checker
@@ -39,7 +40,8 @@ import sheet
 from core import (Store, LawCollector, LLMClient, LawChange,
                   load_config, save_config, logger, BASE_DIR, OUTPUT_DIR,
                   latest_addenda, report_md, report_csv, report_html,
-                  diff_versions, run_check as core_run_check)
+                  diff_versions, run_check as core_run_check,
+                  SESSION_TTL_HOURS)
 from law_parser import node_from_row
 
 
@@ -94,6 +96,78 @@ def cfg() -> Dict:
 
 def store() -> Store:
     return STATE["store"]
+
+
+# ============================================================
+# 인증 — 기본 거부
+# ============================================================
+SESSION_COOKIE = "policy_ai_session"
+
+# 로그인 없이 닿을 수 있는 경로. 여기 없는 것은 전부 막힌다.
+# 화이트리스트로 두는 이유는 새 엔드포인트가 자동으로 보호되게 하려는 것이다.
+# 열거로 두면 추가할 때마다 데코레이터 붙이는 것을 잊어 구멍이 난다.
+PUBLIC_PATHS = {"/login", "/api/auth/login"}
+
+
+@api.middleware("http")
+async def auth_guard(request: Request, call_next):
+    """세션 쿠키를 확인해 request.state.user를 채운다. 없으면 막는다.
+
+    API는 401(JSON), 화면은 /login으로 보낸다 — 브라우저 주소창에 그냥
+    들어온 사람에게 JSON을 던져 봐야 소용이 없다.
+    """
+    if request.url.path in PUBLIC_PATHS:
+        return await call_next(request)
+
+    if store() is None:        # 기동 중이거나 DB 연결 실패
+        return JSONResponse({"detail": "서버 준비 중입니다"}, 503)
+
+    user = await store().session_user(request.cookies.get(SESSION_COOKIE, ""))
+    if not user:
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"detail": "로그인이 필요합니다"}, 401)
+        return RedirectResponse("/login", status_code=303)
+
+    request.state.user = user
+    return await call_next(request)
+
+
+def current_user(request: Request) -> Dict:
+    """미들웨어가 채워 둔 사용자. 보호된 경로에서는 항상 존재한다."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "로그인이 필요합니다")
+    return user
+
+
+@api.post("/api/auth/login")
+async def api_login(response: Response, body: Dict = Body(...)):
+    """로그인. 실패 사유는 구분해서 알리지 않는다(계정 존재 여부 노출 방지)."""
+    user = await store().authenticate(body.get("email", ""),
+                                      body.get("password", ""))
+    if not user:
+        raise HTTPException(401, "이메일 또는 비밀번호가 올바르지 않습니다")
+    token = await store().create_session(user["id"])
+    response.set_cookie(
+        SESSION_COOKIE, token,
+        httponly=True,                      # JS에서 못 읽는다(XSS 대비)
+        samesite="lax",                     # 남의 사이트발 POST를 막는다
+        # secure=True는 HTTPS에서만 쿠키가 오간다는 뜻이라 http인 로컬에서는
+        # 로그인이 되지 않는다. 사내 배포 시 반드시 켤 것.
+        max_age=SESSION_TTL_HOURS * 3600, path="/")
+    return {"ok": True, "user": user}
+
+
+@api.post("/api/auth/logout")
+async def api_logout(request: Request, response: Response):
+    await store().delete_session(request.cookies.get(SESSION_COOKIE, ""))
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
+@api.get("/api/auth/me")
+async def api_me(request: Request):
+    return current_user(request)
 
 
 # ============================================================
@@ -359,6 +433,58 @@ async def index():
     if not p.exists():
         return HTMLResponse("<h1>static/index.html 이 없습니다</h1>", 500)
     return HTMLResponse(p.read_text(encoding="utf-8"))
+
+
+# 로그인 화면. 로그인 없이는 아무 데도 못 가므로 이 페이지만 공개다.
+LOGIN_HTML = """<!doctype html><html lang="ko"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>로그인 — AI 법·정책 동향 분석 플랫폼</title>
+<style>
+ body{font-family:-apple-system,'Apple SD Gothic Neo',sans-serif;
+      display:flex;align-items:center;justify-content:center;min-height:100vh;
+      margin:0;background:#f5f6f8;color:#222}
+ form{background:#fff;padding:32px;border-radius:10px;width:320px;
+      box-shadow:0 2px 12px rgba(0,0,0,.08)}
+ h1{font-size:17px;margin:0 0 20px}
+ label{display:block;font-size:13px;margin:14px 0 5px;color:#555}
+ input{width:100%;padding:9px;border:1px solid #ccc;border-radius:5px;
+       font-size:14px;box-sizing:border-box}
+ button{width:100%;margin-top:22px;padding:10px;border:0;border-radius:5px;
+        background:#2f6fed;color:#fff;font-size:14px;cursor:pointer}
+ button:disabled{background:#9bb6ee;cursor:default}
+ #err{color:#c0392b;font-size:13px;margin-top:14px;min-height:18px}
+</style>
+<form id="f">
+  <h1>AI 법·정책 동향 분석 플랫폼</h1>
+  <label for="email">이메일</label>
+  <input id="email" type="email" autocomplete="username" required autofocus>
+  <label for="pw">비밀번호</label>
+  <input id="pw" type="password" autocomplete="current-password" required>
+  <button id="btn" type="submit">로그인</button>
+  <div id="err"></div>
+</form>
+<script>
+document.getElementById('f').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('btn'), err = document.getElementById('err');
+  btn.disabled = true; err.textContent = '';
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email: email.value, password: pw.value})});
+    if (r.ok) { location.href = '/'; return; }
+    err.textContent = (await r.json()).detail || '로그인에 실패했습니다';
+  } catch (_) {
+    err.textContent = '서버에 연결할 수 없습니다';
+  }
+  btn.disabled = false;
+});
+</script></html>"""
+
+
+@api.get("/login", response_class=HTMLResponse)
+async def login_page():
+    return HTMLResponse(LOGIN_HTML)
 
 
 # ============================================================

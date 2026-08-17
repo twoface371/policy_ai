@@ -305,6 +305,18 @@ def hash_password(password: str) -> str:
             f"${salt.hex()}${dk.hex()}")
 
 
+SESSION_TTL_HOURS = 12
+
+
+def _token_hash(token: str) -> str:
+    """세션 토큰의 DB 보관 형태.
+
+    토큰은 이미 128비트 난수라 사전 공격 대상이 아니다. 비밀번호와 달리
+    느린 해시를 쓸 이유가 없어서 sha256으로 충분하다.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def verify_password(password: str, stored: str) -> bool:
     """저장된 해시와 대조. 형식이 깨졌으면 조용히 False."""
     try:
@@ -616,6 +628,17 @@ class Store:
                   last_login VARCHAR(32) NOT NULL DEFAULT '',
                   CONSTRAINT uk_users_email UNIQUE (email))""",
 
+            # 로그인 세션. 쿠키에는 원본 토큰이, 여기에는 그 sha256만 들어간다.
+            # DB가 통째로 새어도 그것만으로는 남의 세션을 탈 수 없게 하려는 것이다.
+            # 서명 쿠키 대신 서버 보관을 택한 이유는 즉시 무효화 때문이다 —
+            # 로그아웃·계정 정지가 다음 요청부터 바로 먹어야 한다.
+            """CREATE TABLE IF NOT EXISTS sessions (
+                  token_hash VARCHAR(64) PRIMARY KEY,
+                  user_id BIGINT NOT NULL
+                    REFERENCES users(id) ON DELETE CASCADE,
+                  created_at VARCHAR(32) NOT NULL,
+                  expires_at VARCHAR(32) NOT NULL)""",
+
             # 부서 감시 목록 — dept_admin이 관리한다. enabled=0은 '부서 전체에서
             # 잠시 빼기'이며, watchlist.enabled(전역 수집 중단)와는 다른 층이다.
             """CREATE TABLE IF NOT EXISTS dept_watch (
@@ -671,6 +694,8 @@ class Store:
                  ON dept_watch (watch_id)""",
             """CREATE INDEX IF NOT EXISTS idx_uwe_watch
                  ON user_watch_extra (watch_id)""",
+            """CREATE INDEX IF NOT EXISTS idx_sess_exp
+                 ON sessions (expires_at)""",
         ]:
             await self._exec(stmt)
 
@@ -845,6 +870,64 @@ class Store:
     async def set_password(self, user_id: int, password: str):
         await self._exec("UPDATE users SET password_hash=%s WHERE id=%s",
                          (hash_password(password), user_id))
+        # 비밀번호를 바꾸면 기존 세션을 전부 끊는다. 유출을 의심해 바꾸는
+        # 경우가 대부분인데 이미 열린 세션이 살아 있으면 바꾼 의미가 없다.
+        await self._exec("DELETE FROM sessions WHERE user_id=%s", (user_id,))
+
+    # ---------- 세션 ----------
+    async def create_session(self, user_id: int) -> str:
+        """세션을 만들고 쿠키에 넣을 원본 토큰을 돌려준다.
+
+        원본은 여기서만 존재하고 DB에는 해시만 남는다. 그래서 분실한 토큰을
+        서버가 다시 알려 줄 방법은 없다(그게 맞다).
+        """
+        token = secrets.token_urlsafe(32)
+        now = datetime.now()
+        await self._exec(
+            "INSERT INTO sessions (token_hash,user_id,created_at,expires_at) "
+            "VALUES (%s,%s,%s,%s)",
+            (_token_hash(token), user_id,
+             now.isoformat(timespec="seconds"),
+             (now + timedelta(hours=SESSION_TTL_HOURS))
+             .isoformat(timespec="seconds")))
+        return token
+
+    async def session_user(self, token: str) -> Optional[Dict]:
+        """토큰에 딸린 사용자. 만료됐거나 정지된 계정이면 None.
+
+        enabled를 매 요청 확인한다. 계정을 정지시켰는데 이미 로그인해 둔
+        사람이 그대로 쓰는 일이 없어야 한다.
+        저장 형식이 ISO-8601 고정이라 만료 비교는 문자열 비교로 충분하다.
+        """
+        if not token:
+            return None
+        r = await self._fetch(
+            "SELECT u.id,u.email,u.name,u.dept_id,u.role,d.name "
+            "  FROM sessions s"
+            "  JOIN users u ON u.id = s.user_id"
+            "  LEFT JOIN departments d ON d.id = u.dept_id"
+            " WHERE s.token_hash=%s AND s.expires_at > %s AND u.enabled=1",
+            (_token_hash(token), datetime.now().isoformat(timespec="seconds")))
+        if not r:
+            return None
+        u = r[0]
+        return {"id": u[0], "email": u[1], "name": u[2] or "",
+                "dept_id": u[3], "role": u[4], "dept_name": u[5] or ""}
+
+    async def delete_session(self, token: str):
+        if token:
+            await self._exec("DELETE FROM sessions WHERE token_hash=%s",
+                             (_token_hash(token),))
+
+    async def purge_expired_sessions(self) -> int:
+        """만료 세션 청소. 없어도 로그인은 막히지만 테이블이 계속 자란다."""
+        now = datetime.now().isoformat(timespec="seconds")
+        r = await self._fetch(
+            "SELECT COUNT(*) FROM sessions WHERE expires_at <= %s", (now,))
+        n = int(r[0][0]) if r else 0
+        if n:
+            await self._exec("DELETE FROM sessions WHERE expires_at <= %s", (now,))
+        return n
 
     # ---------- 구독(부서 목록 · 개인 추가 · 개인 숨김) ----------
     async def list_user_watch(self, user_id: int) -> List[Dict]:
