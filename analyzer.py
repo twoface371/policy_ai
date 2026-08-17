@@ -64,10 +64,22 @@ def _from_pdf(path: str) -> str:
     return "\n".join(out)
 
 
+def _hwp5txt_cmd() -> str:
+    """hwp5txt 실행 파일 경로.
+
+    pyhwp는 실행 파일을 파이썬 옆(가상환경의 bin)에 깐다. 서버를
+    `.venv/bin/python app.py`로 띄우면 그 디렉터리가 PATH에 없어서
+    이름만으로는 못 찾는다 — 그래서 hwp가 통째로 실패했다.
+    지금 도는 파이썬 옆을 먼저 보고, 없으면 PATH에 맡긴다.
+    """
+    cand = os.path.join(os.path.dirname(sys.executable), "hwp5txt")
+    return cand if os.path.exists(cand) else "hwp5txt"
+
+
 def _from_hwp(path: str) -> str:
     """한글 5.0 (.hwp) — pyhwp의 hwp5txt 커맨드 사용."""
     try:
-        r = subprocess.run(["hwp5txt", path], capture_output=True, timeout=60)
+        r = subprocess.run([_hwp5txt_cmd(), path], capture_output=True, timeout=60)
         if r.returncode == 0:
             return r.stdout.decode("utf-8", errors="replace")
         # 커맨드 실패 시 파이썬 API 시도
@@ -77,15 +89,19 @@ def _from_hwp(path: str) -> str:
 
 
 def _from_hwp_api(path: str) -> str:
-    """hwp5txt 커맨드가 없을 때 파이썬 API로."""
+    """hwp5txt 커맨드가 없을 때 파이썬 API로.
+
+    transform_hwp5_to_text는 바이트를 쓴다. StringIO를 주면
+    'string argument expected, got bytes'로 죽는다.
+    """
     try:
         from hwp5.xmlmodel import Hwp5File
         from hwp5.hwp5txt import TextTransform
         import io
-        buf = io.StringIO()
+        buf = io.BytesIO()
         hwp = Hwp5File(path)
         TextTransform().transform_hwp5_to_text(hwp, buf)
-        return buf.getvalue()
+        return buf.getvalue().decode("utf-8", errors="replace")
     except Exception as e:
         raise RuntimeError(f"hwp 추출 실패: {e}. hwp5txt 설치 필요 (pip install pyhwp)")
 

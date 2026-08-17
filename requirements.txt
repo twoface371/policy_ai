@@ -1,0 +1,31 @@
+# 문서 검사에서 형식별로 다른 패키지가 필요하고, 하나만 빠져도 그 형식만
+# 조용히 실패한다. 실제로 python-docx 자리에 동명이인 docx(파이썬 2용)가
+# 깔려 있어 word가, six가 없어 hwp가 통째로 안 됐다.
+#
+#   python -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# ── 웹 ──
+fastapi
+uvicorn
+python-multipart          # 파일 업로드(UploadFile)
+
+# ── DB ──
+asyncpg
+
+# ── 수집 ──
+httpx
+
+# ── 문서 텍스트 추출 ──
+# docx(0.2.4)가 아니라 python-docx다. 이름이 비슷한 다른 패키지가 있고
+# 그것을 깔면 import docx 는 되지만 'No module named exceptions'로 죽는다.
+python-docx
+pdfplumber                # .pdf
+pyhwp                     # .hwp — hwp5txt 실행 파일을 .venv/bin 에 깐다
+six                       # pyhwp 가 런타임에 쓰는데 의존성에 안 걸려 있다
+openpyxl                  # .xlsx / .xlsm 양식
+
+# ── 리포트 ──
+reportlab                 # PDF 출력. 한글 글꼴은 report.py 의 FONT_PATH 참조
+
+# ── 선택 ──
+# openai                  # llm.enabled=true 로 AI 분석을 쓸 때만 필요
