@@ -446,6 +446,14 @@ async def resolve_citations(col: LawCollector, cites: List[Dict],
         c.update(verdicts[key])
 
         lid = c["법령ID"]
+        # 조문 없이 법령명만 인용한 것(전문 참조)은 조를 대조할 좌표가 없다.
+        # 이름이 현행에 있는지까지만 본다.
+        if c.get("전문참조"):
+            c.update({"조항판정": "전문 참조", "조항사유": "",
+                      "공포일": "", "시행일": ""})
+            if on_progress:
+                on_progress(n, len(cites))
+            continue
         if not (c["판정"] in ("OK", "RENAMED") and lid):
             c.update({"조항판정": "대조 안 함", "조항사유": "",
                       "공포일": "", "시행일": ""})
@@ -474,15 +482,31 @@ async def resolve_citations(col: LawCollector, cites: List[Dict],
         if on_progress:
             on_progress(n, len(cites))
 
+    # 현행에 없는 전문 참조는 버린다 — 오탐 제어의 마지막 층이다.
+    #
+    # 조문 없는 법령명 탐지는 헐거울 수밖에 없다('세부 기준', '그 방법'). 조가
+    # 붙은 인용이라면 '제N조'가 법령임을 보증하므로 이름이 안 맞을 때 '확인
+    # 필요'로 올리는 것이 맞지만, 여기서는 애초에 법령이 아니었을 가능성이 더
+    # 크다. 없는 법을 지적하느니 조용히 빼는 편이 검사 결과를 읽게 한다.
+    #
+    # 제자리 수정이 이 함수의 약속이라 슬라이스로 갈아 끼운다.
+    cites[:] = [c for c in cites
+                if not (c.get("전문참조") and c["판정"] not in ("OK", "RENAMED"))]
+
 
 ATTENTION = ("개정됨", "조항 없음", "신설", "삭제")
 
 
 def problems(cites: List[Dict]) -> List[Dict]:
-    """사람이 봐야 하는 인용 — 이름이 수상하거나, 조가 없거나, 손댄 것."""
+    """사람이 봐야 하는 인용 — 이름이 수상하거나, 조가 없거나, 손댄 것.
+
+    전문 참조는 넣지 않는다. 조를 대조하지 않았으므로 '검토가 필요하다'고
+    말할 근거가 없고, 이름이 현행에 없는 것은 이미 걸러져 남아 있지 않다.
+    """
     return [c for c in cites
-            if c["판정"] in ("RENAMED", "NOTFOUND")
-            or c.get("조항판정") in ATTENTION]
+            if not c.get("전문참조")
+            and (c["판정"] in ("RENAMED", "NOTFOUND")
+                 or c.get("조항판정") in ATTENTION)]
 
 
 async def run(path: str, cfg: Dict, base_date: str = "") -> Dict:
@@ -512,6 +536,9 @@ def summarize(cites: List[Dict]) -> Dict:
             "개명의심": cnt.get("RENAMED", 0),
             "확인필요": cnt.get("NOTFOUND", 0),
             "대조제외": cnt.get("SKIP", 0),
+            # 조문 없이 법령명만 인용한 것. 조를 대조하지 않았다는 뜻이므로
+            # 숫자로 보여 줘야 '왜 이건 판정이 없나'를 묻지 않는다.
+            "전문참조": sum(1 for c in cites if c.get("전문참조")),
             "개정됨": art.get("개정됨", 0),
             "조항없음": art.get("조항 없음", 0),
             "신설": art.get("신설", 0),

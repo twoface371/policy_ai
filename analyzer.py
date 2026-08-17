@@ -147,6 +147,71 @@ _LAW_QUOTED = re.compile(
 _LAW_BARE = re.compile(
     r"제(\d+)조(?:의(\d+))?(?:\s*제(\d+)항)?(?:\s*제(\d+)호)?")
 
+# E. 조문 없이 법령명만 — '「개인정보 보호법」에 따라', '전자서명법에 따른'
+#
+# 위 A~D가 전부 '제N조'를 요구해서, 법 전체를 가리키는 문장이 통째로 탐지에서
+# 빠졌다. 실제 공문에 흔한 형태다.
+#
+# 이 패턴은 앞의 것들보다 훨씬 헐겁다. '방법·위법·현행법'처럼 법으로 끝나는
+# 보통 낱말이 다 걸리기 때문이다. 그래서 두 겹으로 막는다.
+#   1) 아래 _NOT_LAW 로 뻔한 것을 먼저 걷어낸다.
+#   2) 남은 것은 법제처에 실제로 있는 이름일 때만 살린다(checker 가 처리).
+#      조가 없으니 '없는 법령'이라고 지적할 근거도 약하다 — 조용히 버린다.
+_LAW_ONLY_QUOTED = re.compile(
+    _QUOTE + r"\s*([가-힣A-Za-z0-9·ㆍ\s]+?" + _TAIL + r")\s*" + _QUOTE)
+
+# 전문 참조에서는 꼬리를 좁힌다. 규정·규칙·지침·예규·조건·기준은 보통명사로도
+# 쓰여서('세부 기준', '무처리 규정', '이 규정'), 조문이 없으면 법령인지 문장의
+# 일부인지 가릴 수 없다. 실측에서 오탐의 대부분이 이 여섯이었다.
+# 조문이 붙은 인용은 '제N조'가 법령임을 보증하므로 기존 _TAIL 을 그대로 쓴다.
+_TAIL_STRICT = r"(?:법률|법|시행규칙|시행령)"
+
+# 법령명은 한 줄 안에서만 이어 붙인다(_LAW_TAIL 과 같은 이유).
+# 뒤에 조사·구두점·줄끝이 와야 한다 — '개인정보 보호법률안' 같은 말의 중간을
+# 물지 않게 한다.
+_LAW_ONLY_BARE = re.compile(
+    r"([가-힣·ㆍ]+(?:[ \t][가-힣·ㆍ]+){0,7}?[ \t]?" + _TAIL_STRICT + r")"
+    r"(?=[\s,.·]|을|를|은|는|이|가|에|의|와|과|상|및|또는|$)")
+
+# 관형사로 시작하면 법령명이 아니다 — '그 방법', '이 시행령', '해당 법률'.
+_DETERMINER = re.compile(r"^(?:그|이|저|본|해당|동|각|위|아래|같은|앞|뒤|당해)\s")
+
+# 법으로 끝나지만 법령명이 아닌 말. 이것을 인용으로 올리면 검사 결과가
+# 노이즈로 덮인다.
+_NOT_LAW = {
+    "방법", "위법", "적법", "불법", "합법", "준법", "탈법", "편법", "입법",
+    "사법", "행정법", "현행법", "국내법", "국제법", "실정법", "성문법",
+    "관습법", "특별법", "일반법", "모법", "상위법", "하위법", "개별법",
+    "관련법", "관계법", "이 법", "그 법", "본 법", "해당 법", "같은 법",
+    "동법", "법률", "법", "시행령", "시행규칙", "규정", "규칙", "지침",
+    "예규", "조건", "기준", "관련 법", "관계 법", "관련 법령", "관계 법령",
+}
+
+# 법령명 바로 뒤에 조문이 오면 그것은 조문 인용이다(전문 참조가 아니다).
+_FOLLOWED_BY_ART = re.compile(r"\s*제\s*\d+\s*조")
+
+# 조문 조각에서 시작하는 것을 거른다 — '제3조 및 제5조의 규정' 에서
+# '조의 규정' 같은 토막이 잡힌다.
+_ART_FRAGMENT = re.compile(r"^(?:제?\s*\d+\s*)?[조항호목]")
+
+
+def _plausible_law_name(law: str) -> bool:
+    """전문 참조로 올릴 만한 이름인가. 값싼 판정만 한다.
+
+    최종 판단은 법제처 조회가 한다(checker). 여기서는 조회를 낭비하지 않을
+    만큼만 걸러 낸다.
+    """
+    if law in _NOT_LAW or len(law.replace(" ", "")) < 2:
+        return False
+    if _ART_FRAGMENT.match(law) or any(ch.isdigit() for ch in law):
+        return False
+    if _DETERMINER.match(law):
+        return False
+    # 앞이 잘려 나온 조각 — '행 · 지침'처럼 한 음절로 시작하는 두 낱말짜리.
+    # 진짜 한 음절 법령명(민법·형법)은 낱말이 하나라 여기 걸리지 않는다.
+    tokens = law.split()
+    return not (len(tokens) > 1 and len(tokens[0]) == 1)
+
 # 법령명은 한 줄 안에서만 이어 붙인다. \s로 두면 개행을 넘어가서
 # 바로 윗줄(소제목 등)의 단어까지 법령명으로 끌어온다.
 #
@@ -204,6 +269,10 @@ _WRAP_JOIN = re.compile(r"(?:" + "|".join(_NAME_CONNECTOR) + r")[ \t]*\n[ \t]*")
 
 
 def _build_article(nums) -> str:
+    # 조문 없이 법령명만 인용한 경우. 빈 문자열이라야 화면·리포트의 조문 칸이
+    # 비어 나온다 — 그러지 않으면 '제None조'가 찍힌다.
+    if not nums or nums[0] is None:
+        return ""
     a = f"제{nums[0]}조"
     if nums[1]:
         a += f"의{nums[1]}"
@@ -216,7 +285,12 @@ def _build_article(nums) -> str:
 
 def _art_key(nums):
     """_build_article과 같은 슬라이스에서 조 번호만 숫자로 뽑는다.
-    표시용 문자열만 남기면 현행 조문과 대조할 좌표가 사라진다."""
+    표시용 문자열만 남기면 현행 조문과 대조할 좌표가 사라진다.
+
+    조문 없이 법령명만 인용한 경우는 (0, 0)이다 — 대조할 좌표가 아예 없다.
+    """
+    if not nums or nums[0] is None:
+        return 0, 0
     return int(nums[0]), int(nums[1] or 0)
 
 
@@ -310,7 +384,18 @@ def find_citations(text: str) -> List[Dict]:
         events.append((m.start(), m.end(), "dong", m))
     for m in _LAW_BARE.finditer(text):
         events.append((m.start(), m.end(), "bare", m))
-    events.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+    # 조문 없는 법령명은 맨 뒤에 둔다. 정렬이 (위치, 길이)라 같은 자리에서
+    # 조문까지 붙은 긴 인용이 먼저 잡히고, 이것은 남은 자리에만 들어간다 —
+    # '개인정보 보호법 제15조'가 '개인정보 보호법'으로 축소되면 안 된다.
+    for m in _LAW_ONLY_QUOTED.finditer(text):
+        events.append((m.start(), m.end(), "lawq", m))
+    for m in _LAW_ONLY_BARE.finditer(text):
+        events.append((m.start(), m.end(), "lawb", m))
+    # 3순위 키: 조문이 붙은 것(0)을 조문 없는 것(1)보다 앞세운다. 길이만으로는
+    # '「소프트웨어 진흥법」'(따옴표 포함)이 '소프트웨어 진흥법 제51조'보다
+    # 길어지는 자리가 생긴다.
+    _rank = {"quoted": 0, "dong": 0, "bare": 0, "lawq": 1, "lawb": 1}
+    events.sort(key=lambda x: (x[0], _rank[x[2]], -(x[1] - x[0])))
 
     claimed = []
     out = []
@@ -334,6 +419,28 @@ def find_citations(text: str) -> List[Dict]:
             law = f"{base} {suffix}".strip() if suffix else base
             cands = [law]
             nums = m.groups()[2:6]
+        elif kind in ("lawq", "lawb"):
+            # 조문 없이 법령명만.
+            if kind == "lawq":
+                # 따옴표가 양쪽 경계를 확정해 준다
+                law = re.sub(r"\s+", " ", m.group(1)).strip()
+            else:
+                # 따옴표가 없으면 왼쪽 경계를 정규식이 못 정한다. 조문 인용과
+                # 같은 절단 로직을 태워 앞 문장을 떼어 낸다 — 그러지 않으면
+                # '본 사업은 전자정부법'처럼 문장째로 잡힌다.
+                cands = _law_name_candidates(text, e)
+                if not cands:
+                    continue
+                law = cands[0]
+            if not _plausible_law_name(law):
+                continue
+            # 바로 뒤에 조문이 붙어 있으면 그것은 조문 인용이다. 조문 쪽 이벤트가
+            # '제N조'만 차지해 겹침 검사에 안 걸리므로 여기서 걸러야 한다.
+            if _FOLLOWED_BY_ART.match(text[e:e + 12]):
+                continue
+            cands = [law]
+            last_law = law
+            nums = (None, None, None, None)
         else:  # bare
             cands = _law_name_candidates(text, s)
             if not cands and last_law and claimed \
@@ -353,6 +460,9 @@ def find_citations(text: str) -> List[Dict]:
         out.append({"법령": law, "법령후보": cands,
                     "조문": _build_article(nums),
                     "조번호": art_no, "조가지번호": art_branch,
+                    # 전문 참조 — 조를 대조할 대상이 없다. checker 가 이 값을
+                    # 보고 조 판정을 건너뛰고, 현행에 없는 이름이면 버린다.
+                    "전문참조": kind in ("lawq", "lawb"),
                     "문맥": text[ctx_s:ctx_e].replace("\n", " ").strip()})
     return out
 
