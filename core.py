@@ -963,6 +963,31 @@ class Store:
                  "status": r[6], "last_updated": r[7],
                  "source": r[8], "muted": bool(r[9])} for r in rows]
 
+    async def visible_law_ids(self, user_id: int) -> List[str]:
+        """이 사용자에게 보이는 법령의 law_id — 조회 필터의 입력.
+
+        list_user_watch와 달리 개인 숨김을 빼고 준다. 저쪽은 관리 화면용이라
+        되돌리려면 숨긴 것도 남아 있어야 하지만, 이쪽은 '지금 화면에 뜰 것'을
+        정하는 필터라 숨긴 것이 들어오면 안 된다.
+
+        전문을 아직 못 받은 항목(law_id='')은 뺀다. 붙일 개정 이력도 전문도
+        없어서 필터에 넣으면 빈 문자열로 엉뚱한 행을 잡는다.
+        """
+        rows = await self._fetch(
+            "SELECT DISTINCT w.law_id FROM watchlist w"
+            "  LEFT JOIN dept_watch dw"
+            "    ON dw.watch_id = w.id AND dw.enabled = 1"
+            "   AND dw.dept_id = (SELECT dept_id FROM users WHERE id = %s)"
+            "  LEFT JOIN user_watch_extra ux"
+            "    ON ux.watch_id = w.id AND ux.user_id = %s"
+            "  LEFT JOIN user_watch_mute m"
+            "    ON m.watch_id = w.id AND m.user_id = %s"
+            " WHERE (dw.watch_id IS NOT NULL OR ux.watch_id IS NOT NULL)"
+            "   AND m.watch_id IS NULL"
+            "   AND w.law_id IS NOT NULL AND w.law_id <> ''",
+            (user_id, user_id, user_id))
+        return [r[0] for r in rows]
+
     async def watch_subscriber_count(self, watch_id: int) -> int:
         """이 법령을 목록에 걸어 둔 부서 + 개인의 수.
 
@@ -1097,13 +1122,24 @@ class Store:
              f.announced_date, f.content, now))
 
     async def search_fulltext(self, q: str = "", limit: int = 50,
-                              offset: int = 0) -> Tuple[List[Dict], int]:
-        where, params = "", []
+                              offset: int = 0,
+                              law_ids: Optional[List[str]] = None
+                              ) -> Tuple[List[Dict], int]:
+        """law_ids 규약은 list_changes와 같다(None=전체, []=없음)."""
+        if law_ids is not None and not law_ids:
+            return [], 0
+        wh, params = [], []
+        if law_ids is not None:
+            wh.append(f"law_id IN ({','.join(['%s'] * len(law_ids))})")
+            params.extend(law_ids)
         if q:
             # ILIKE — PostgreSQL의 LIKE는 대소문자를 가린다. MySQL의
             # utf8mb4 기본 콜레이션은 안 가렸으므로 그 동작을 유지한다.
-            where = " WHERE title ILIKE %s OR content ILIKE %s"
-            params = [f"%{q}%", f"%{q}%"]
+            # 괄호가 필요하다 — law_id 조건과 AND로 묶일 때 OR가 먼저
+            # 풀리면 남의 법령까지 딸려 나온다.
+            wh.append("(title ILIKE %s OR content ILIKE %s)")
+            params += [f"%{q}%", f"%{q}%"]
+        where = (" WHERE " + " AND ".join(wh)) if wh else ""
         total = (await self._fetch(
             f"SELECT COUNT(*) FROM law_fulltext{where}", tuple(params)))[0][0]
         rows = await self._fetch(
@@ -1179,12 +1215,25 @@ class Store:
 
     async def list_changes(self, q: str = "", start: str = "", end: str = "",
                            date_mode: str = "ef", limit: int = 50,
-                           offset: int = 0) -> Tuple[List[Dict], int]:
+                           offset: int = 0,
+                           law_ids: Optional[List[str]] = None
+                           ) -> Tuple[List[Dict], int]:
+        """law_ids를 주면 그 법령의 개정만 돌려준다.
+
+        None은 '필터 없음'(전사 기준 — 자동 분석·리포트 재생성 같은 내부
+        경로)이고, 빈 리스트는 '보이는 법령이 하나도 없음'이다. 이 둘을
+        섞으면 목록이 빈 사용자에게 전사 개정이 통째로 보인다.
+        """
+        if law_ids is not None and not law_ids:
+            return [], 0
         # 기본은 시행일 기준. 공포일 기준 조회는 UI에서 없앴지만, 리포트
         # 재생성 같은 내부 용도로 인자 자체는 남겨 둔다.
         col = "announced_date" if date_mode == "anc" else "enacted_date"
         start, end = self._date_param(start), self._date_param(end)
         wh, params = [], []
+        if law_ids is not None:
+            wh.append(f"law_id IN ({','.join(['%s'] * len(law_ids))})")
+            params.extend(law_ids)
         if q:
             wh.append("title ILIKE %s"); params.append(f"%{q}%")
         if start:
@@ -1613,21 +1662,43 @@ class Store:
              checked, changed, pending, failed, reason))
 
     # ---------- stats ----------
-    async def stats(self) -> Dict:
-        async def n(sql):
-            r = await self._fetch(sql)
+    async def stats(self, law_ids: Optional[List[str]] = None) -> Dict:
+        """law_ids 규약은 list_changes와 같다(None=전체, []=없음).
+
+        화면의 숫자가 목록과 어긋나면 안 되므로 같은 필터를 태운다 —
+        목록에는 3건만 뜨는데 '개정 40건'이라고 적혀 있으면 오해를 부른다.
+        """
+        if law_ids is not None and not law_ids:
+            return {"watchlist": 0, "fulltext": 0, "changes": 0,
+                    "analyzed": 0, "upcoming_90d": 0}
+        ph = ",".join(["%s"] * len(law_ids)) if law_ids is not None else ""
+        ids = tuple(law_ids or ())
+
+        async def n(sql: str, params: tuple = ()) -> int:
+            r = await self._fetch(sql, params)
             return r[0][0] if r else 0
-        upcoming = await self._fetch(
-            """SELECT COUNT(*) FROM law_changes
-               WHERE enacted_date >= %s AND enacted_date <= %s""",
-            (datetime.now().date().isoformat(),
-             (datetime.now().date() + timedelta(days=90)).isoformat()))
+
+        if law_ids is None:
+            where_law, where_and = "", ""
+        else:
+            where_law, where_and = f" WHERE law_id IN ({ph})", \
+                                   f" AND law_id IN ({ph})"
+        today = datetime.now().date().isoformat()
+        in90 = (datetime.now().date() + timedelta(days=90)).isoformat()
         return {
-            "watchlist": await n("SELECT COUNT(*) FROM watchlist WHERE enabled=1"),
-            "fulltext": await n("SELECT COUNT(*) FROM law_fulltext"),
-            "changes": await n("SELECT COUNT(*) FROM law_changes"),
-            "analyzed": await n("SELECT COUNT(*) FROM analyses"),
-            "upcoming_90d": upcoming[0][0] if upcoming else 0,
+            "watchlist": await n(
+                "SELECT COUNT(*) FROM watchlist WHERE enabled=1"
+                + (f" AND law_id IN ({ph})" if law_ids is not None else ""), ids),
+            "fulltext": await n(
+                f"SELECT COUNT(*) FROM law_fulltext{where_law}", ids),
+            "changes": await n(
+                f"SELECT COUNT(*) FROM law_changes{where_law}", ids),
+            "analyzed": await n(
+                "SELECT COUNT(*) FROM analyses WHERE mst IN "
+                f"(SELECT mst FROM law_changes{where_law})", ids),
+            "upcoming_90d": await n(
+                "SELECT COUNT(*) FROM law_changes WHERE enacted_date >= %s"
+                f" AND enacted_date <= %s{where_and}", (today, in90) + ids),
         }
 
 

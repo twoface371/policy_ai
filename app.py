@@ -25,7 +25,7 @@ import asyncio
 import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from urllib.parse import quote
 
 from fastapi import (FastAPI, HTTPException, Query, Body, Depends, File, Form,
@@ -521,9 +521,11 @@ async def login_page():
 # 조회 API (전부 읽기 전용)
 # ============================================================
 @api.get("/api/stats")
-async def api_stats():
-    s = await store().stats()
-    wl = await store().list_watch()
+async def api_stats(request: Request):
+    user = current_user(request)
+    s = await store().stats(await store().visible_law_ids(user["id"]))
+    wl = [w for w in await store().list_user_watch(user["id"])
+          if not w["muted"]]
     s["watch_total"] = len(wl)
     s["watch_loaded"] = sum(1 for w in wl if w["status"] == "loaded")
     s["watch_pending"] = sum(1 for w in wl if w["status"] == "pending")
@@ -538,8 +540,12 @@ async def api_stats():
 
 
 @api.get("/api/watchlist")
-async def api_watch_list():
-    return await store().list_watch()
+async def api_watch_list(request: Request):
+    """내 감시 목록 = (부서 목록 ∪ 개인 추가) − 개인 숨김.
+
+    숨긴 것도 muted=True로 함께 준다 — 화면에서 되돌릴 수 있어야 한다.
+    """
+    return await store().list_user_watch(current_user(request)["id"])
 
 
 @api.get("/api/collect/status")
@@ -548,11 +554,17 @@ async def api_collect_status():
 
 
 @api.get("/api/changes")
-async def api_changes(q: str = "", start: str = "", end: str = "",
-                      limit: int = Query(50, ge=1, le=500),
+async def api_changes(request: Request, q: str = "", start: str = "",
+                      end: str = "", limit: int = Query(50, ge=1, le=500),
                       offset: int = Query(0, ge=0)):
-    """기간 + 시행일 기준 조회. 한 법령이 기간 내 2회 개정되면 2건으로 나온다."""
-    items, total = await store().list_changes(q, start, end, "ef", limit, offset)
+    """기간 + 시행일 기준 조회. 한 법령이 기간 내 2회 개정되면 2건으로 나온다.
+
+    내 목록의 법령만 본다. 개정 알림은 '내 일'이어야 의미가 있고, 전사
+    개정이 섞이면 정작 봐야 할 것이 묻힌다.
+    """
+    ids = await store().visible_law_ids(current_user(request)["id"])
+    items, total = await store().list_changes(q, start, end, "ef",
+                                              limit, offset, law_ids=ids)
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
@@ -569,11 +581,18 @@ async def api_change_detail(mst: str):
 
 
 @api.get("/api/fulltext")
-async def api_fulltext_list(q: str = "", limit: int = Query(50, ge=1, le=500),
+async def api_fulltext_list(request: Request, q: str = "",
+                            limit: int = Query(50, ge=1, le=500),
                             offset: int = Query(0, ge=0)):
     """전문 목록. 각 행에 판본 수와 최근 개정의 변경 조항 수를 붙인다 —
-    전문을 열어보지 않고도 목록에서 바뀐 게 있는지 알 수 있게."""
-    items, total = await store().search_fulltext(q, limit, offset)
+    전문을 열어보지 않고도 목록에서 바뀐 게 있는지 알 수 있게.
+
+    목록은 내 것만 보이지만 개별 전문 조회(/api/fulltext/{law_id})는 막지
+    않는다. 법령은 법제처가 공개하는 정보이고, 다른 부서 소관 법을 참고로
+    열어 보는 것은 정상 업무다.
+    """
+    ids = await store().visible_law_ids(current_user(request)["id"])
+    items, total = await store().search_fulltext(q, limit, offset, law_ids=ids)
     badges = await store().change_badges([i["law_id"] for i in items])
     for i in items:
         i.update(badges.get(i["law_id"], {}))
@@ -686,14 +705,18 @@ async def api_version_diff(law_id: str, new: str = "", old: str = ""):
 # ============================================================
 # 리포트 다운로드
 # ============================================================
-async def _collect_report_items(start: str, end: str, limit: int) -> List:
+async def _collect_report_items(start: str, end: str, limit: int,
+                                law_ids: Optional[List[str]] = None) -> List:
     """리포트용 (개정 건, 분석 결과) 쌍.
 
     분석은 mst 기준으로 붙인다. content_hash로 맞추면 프롬프트나 모델을
     바꾼 순간 리포트가 통째로 비어 버린다(캐시 키와 표시 키는 역할이 다름).
+
+    law_ids 규약은 Store.list_changes와 같다(None=전체, []=없음).
     """
     items, _ = await store().list_changes(start=start, end=end,
-                                          date_mode="ef", limit=limit)
+                                          date_mode="ef", limit=limit,
+                                          law_ids=law_ids)
     out = []
     for it in items:
         a = await store().get_latest_analysis(it["mst"])
@@ -703,11 +726,13 @@ async def _collect_report_items(start: str, end: str, limit: int) -> List:
 
 
 @api.get("/api/report/{fmt}")
-async def api_report(fmt: str, start: str = "", end: str = "",
-                     limit: int = Query(100, ge=1, le=500)):
+async def api_report(request: Request, fmt: str, start: str = "",
+                     end: str = "", limit: int = Query(100, ge=1, le=500)):
+    """내 목록 기준 리포트. 화면에 보이는 것과 받아 보는 것이 같아야 한다."""
     if fmt not in ("md", "csv", "html"):
         raise HTTPException(400, "fmt은 md / csv / html 중 하나여야 합니다")
-    items = await _collect_report_items(start, end, limit)
+    ids = await store().visible_law_ids(current_user(request)["id"])
+    items = await _collect_report_items(start, end, limit, law_ids=ids)
     if not items:
         raise HTTPException(404, "분석된 개정 건이 없습니다. 자동 분석 완료 후 다시 시도하세요.")
     period = f"{start or '전체'} ~ {end or '전체'}"
@@ -991,20 +1016,38 @@ def _save_check(result: Dict):
         json.dumps(result, ensure_ascii=False), encoding="utf-8")
 
 
-def _load_check(cid: str) -> Dict:
-    """저장된 결과 또는 진행 중 상태.
+def _owns(d: Dict, user: Dict) -> bool:
+    """이 검사 결과가 이 사용자 것인가.
+
+    소유자가 없는 결과(계정 기능 이전에 만들어진 것)는 아무의 것도 아니다.
+    남이 올린 사내 문서일 수 있으므로 관리자에게도 열어 주지 않는다 —
+    파일은 그대로 남으니 필요하면 디스크에서 직접 본다.
+    """
+    return d.get("소유자") == user["id"]
+
+
+def _load_check(cid: str, user: Dict) -> Dict:
+    """저장된 결과 또는 진행 중 상태. 남의 것이면 없는 것처럼 취급한다.
 
     메모리를 먼저 본다. 진행 중인 검사는 아직 파일이 없다.
+
+    남의 검사ID를 찍었을 때 403이 아니라 404를 주는 이유는, 403이면 '그
+    ID의 검사가 존재한다'는 사실 자체가 새어 나가기 때문이다.
     """
     if not CHECK_ID_RE.match(cid):
         raise HTTPException(400, "검사ID 형식이 올바르지 않습니다")
     live = STATE["checks"].get(cid)
     if live and live.get("상태") != "완료":
+        if not _owns(live, user):
+            raise HTTPException(404, "저장된 검사 결과가 없습니다")
         return live
     p = CHECKS_DIR / f"{cid}.json"
     if not p.exists():
         raise HTTPException(404, "저장된 검사 결과가 없습니다")
-    return json.loads(p.read_text(encoding="utf-8"))
+    d = json.loads(p.read_text(encoding="utf-8"))
+    if not _owns(d, user):
+        raise HTTPException(404, "저장된 검사 결과가 없습니다")
+    return d
 
 
 async def _run_check(cid: str, cites: List[Dict], base_date: str,
@@ -1046,22 +1089,32 @@ def api_check_template():
 
 
 @api.get("/api/checks")
-def api_check_list(limit: int = Query(20, ge=1, le=100)):
-    """최근 검사 목록 — 최신순. 본문은 빼고 표지만 준다.
+def api_check_list(request: Request, limit: int = Query(20, ge=1, le=100)):
+    """내가 올린 검사 목록 — 최신순. 본문은 빼고 표지만 준다.
 
     진행 중·실패한 검사를 맨 위에 함께 준다. 목록에 없으면 사용자는 검사가
     시작된 것조차 확인할 수 없다.
+
+    업로드한 사내 문서의 검사 결과라 본인 것만 준다. limit은 필터 뒤에
+    적용한다 — 먼저 자르면 남의 결과가 자리를 차지해 내 것이 밀려난다.
     """
+    user = current_user(request)
     out = [dict(v) for v in STATE["checks"].values()
-           if v.get("상태") != "완료"]
+           if v.get("상태") != "완료" and _owns(v, user)]
     out.sort(key=lambda v: v["검사ID"], reverse=True)
     if not CHECKS_DIR.exists():
         return {"items": out}
-    for p in sorted(CHECKS_DIR.glob("*.json"), reverse=True)[:limit]:
+    mine = 0
+    for p in sorted(CHECKS_DIR.glob("*.json"), reverse=True):
+        if mine >= limit:
+            break
         try:
             d = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue        # 쓰다 만 파일 하나가 목록 전체를 막지 않게 한다
+        if not _owns(d, user):
+            continue
+        mine += 1
         out.append({"검사ID": d.get("검사ID", p.stem),
                     "파일명": d.get("파일명", ""),
                     "검사일시": d.get("검사일시", ""),
@@ -1070,16 +1123,16 @@ def api_check_list(limit: int = Query(20, ge=1, le=100)):
 
 
 @api.get("/api/checks/{cid}")
-def api_check_get(cid: str):
-    return _load_check(cid)
+def api_check_get(cid: str, request: Request):
+    return _load_check(cid, current_user(request))
 
 
 @api.get("/api/checks/{cid}/download/{fmt}")
-def api_check_download(cid: str, fmt: str):
+def api_check_download(cid: str, fmt: str, request: Request):
     """저장된 검사 결과를 마크다운 / PDF로 내려준다."""
     if fmt not in ("md", "pdf"):
         raise HTTPException(400, "md / pdf 만 지원합니다")
-    d = _load_check(cid)
+    d = _load_check(cid, current_user(request))
     stem = os.path.splitext(d.get("파일명") or "검사결과")[0]
     name = f"{stem}_법령검사_{cid[:8]}.{fmt}"
     if fmt == "md":
@@ -1095,7 +1148,7 @@ def api_check_download(cid: str, fmt: str):
 
 
 @api.post("/api/check-document")
-async def api_check_document(file: UploadFile = File(...),
+async def api_check_document(request: Request, file: UploadFile = File(...),
                              base_date: str = Form("")):
     """문서 또는 양식에서 법령 인용을 모아 현행법과 대조한다.
 
@@ -1157,7 +1210,9 @@ async def api_check_document(file: UploadFile = File(...),
             pass
 
     cid = _new_check_id()
-    meta = {"파일명": file.filename, **size}
+    # 소유자는 meta에 넣는다. _run_check가 meta를 결과에 펼쳐 넣으므로
+    # 저장 파일과 진행 중 상태가 같은 키를 갖게 된다.
+    meta = {"파일명": file.filename, "소유자": current_user(request)["id"], **size}
     STATE["checks"][cid] = {"검사ID": cid, "상태": "진행중", **meta,
                             "진행": {"done": 0, "total": len(cites)}}
     STATE["check_running"] = True
