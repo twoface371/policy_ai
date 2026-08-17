@@ -811,8 +811,13 @@ class Store:
                     "  (SELECT COUNT(*) FROM dept_watch w WHERE w.dept_id=d.id)"
                     " FROM departments d ORDER BY d.id")]
 
-    async def add_department(self, name: str) -> Optional[int]:
-        """부서 생성. 이름이 겹치면 None."""
+    async def add_department(self, name: str, seed: bool = True) -> Optional[int]:
+        """부서 생성. 이름이 겹치면 None.
+
+        seed=True면 전문 적재에 성공한 법령(status='loaded')을 기본 목록으로
+        넣는다. 빈 목록으로 시작하면 그 부서원 전원이 아무것도 못 보고,
+        실무적으로는 새 부서도 대개 같은 법령을 본다.
+        """
         name = (name or "").strip()
         if not name:
             return None
@@ -822,7 +827,39 @@ class Store:
             "INSERT INTO departments (name,created_at) VALUES (%s,%s)",
             (name, datetime.now().isoformat(timespec="seconds")))
         r = await self._fetch("SELECT id FROM departments WHERE name=%s", (name,))
-        return r[0][0] if r else None
+        if not r:
+            return None
+        dept_id = r[0][0]
+        if seed:
+            await self.seed_dept_watch(dept_id)
+        return dept_id
+
+    async def seed_dept_watch(self, dept_id: int) -> int:
+        """부서 목록을 기본값(적재 성공한 법령)으로 채우고 넣은 건수를 준다.
+
+        적재 실패한 항목(notfound 등)은 넣지 않는다. 열어도 전문이 없어
+        목록만 어지럽히고, 그런 항목은 이름을 고쳐 다시 등록해야 한다.
+
+        되살리기는 add_dept_watch와 같은 규칙을 지킨다 — 원래 구독자가
+        하나도 없던 것만 수집을 다시 켠다. 전사 관리자가 다른 이유로 꺼 둔
+        항목을 새 부서 하나가 뒤집으면 안 된다.
+        """
+        revive = [x[0] for x in await self._fetch(
+            "SELECT w.id FROM watchlist w"
+            " WHERE w.status='loaded'"
+            "   AND NOT EXISTS (SELECT 1 FROM dept_watch d WHERE d.watch_id=w.id)"
+            "   AND NOT EXISTS (SELECT 1 FROM user_watch_extra u"
+            "                    WHERE u.watch_id=w.id)")]
+        await self._exec(
+            "INSERT INTO dept_watch (dept_id,watch_id,created_at) "
+            "SELECT %s, id, %s FROM watchlist WHERE status='loaded' "
+            "ON CONFLICT DO NOTHING",
+            (dept_id, datetime.now().isoformat(timespec="seconds")))
+        for wid in revive:
+            await self._exec("UPDATE watchlist SET enabled=1 WHERE id=%s", (wid,))
+        r = await self._fetch(
+            "SELECT COUNT(*) FROM dept_watch WHERE dept_id=%s", (dept_id,))
+        return int(r[0][0]) if r else 0
 
     async def get_department(self, dept_id: int) -> Optional[Dict]:
         r = await self._fetch("SELECT id,name FROM departments WHERE id=%s",

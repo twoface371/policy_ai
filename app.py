@@ -246,11 +246,16 @@ async def api_dept_add(body: Dict = Body(...), _: Dict = Depends(super_only)):
 
     계정을 만들 때 부서명을 받아 적는 방식이면 오타로 '법무팀'과
     '법무 팀'이 갈라지고, 이름을 고치거나 인원을 옮길 방법이 없어진다.
+
+    감시 목록은 전문 적재에 성공한 법령으로 채워서 시작한다. 빈 목록이면
+    그 부서원 전원이 아무것도 못 보는 상태로 출발한다. 필요 없는 것은
+    부서 목록에서 빼면 되고, 그것은 다른 부서에 영향을 주지 않는다.
     """
     dept_id = await store().add_department(body.get("name") or "")
     if dept_id is None:
         raise HTTPException(409, "이미 있는 부서이거나 이름이 비었습니다")
-    return {"ok": True, "id": dept_id}
+    seeded = len(await store().list_dept_watch(dept_id))
+    return {"ok": True, "id": dept_id, "seeded": seeded}
 
 
 @api.post("/api/admin/departments/{did}/rename")
