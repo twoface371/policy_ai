@@ -103,7 +103,12 @@ del.df-del{background:#fadcdc;color:#932626;text-decoration:line-through;
     <h1>AI 법·정책 동향 분석 플랫폼</h1>
     <div class="sub">법제처 국가법령정보 OpenAPI 기반 · 개정 추적 및 영향 분석</div>
   </div>
-  <div><span class="badge" id="auto-badge">상태 확인 중</span></div>
+  <div style="display:flex;align-items:center;gap:14px">
+    <span class="badge" id="auto-badge">상태 확인 중</span>
+    <span style="font-size:12px;text-align:right;line-height:1.5" id="me-box"></span>
+    <button class="b g" id="btn-pw" style="padding:4px 10px;font-size:12px">비밀번호</button>
+    <button class="b g" id="btn-logout" style="padding:4px 10px;font-size:12px">로그아웃</button>
+  </div>
 </header>
 
 <nav>
@@ -112,7 +117,8 @@ del.df-del{background:#fadcdc;color:#932626;text-decoration:line-through;
   <button data-tab="laws">법령 전문</button>
   <button data-tab="watch">감시 법령</button>
   <button data-tab="check">문서 검사</button>
-  <button data-tab="settings">설정</button>
+  <button data-tab="accounts" data-need="dept_admin" class="hide">계정 관리</button>
+  <button data-tab="settings" data-need="superadmin" class="hide">설정</button>
 </nav>
 
 <main>
@@ -122,7 +128,7 @@ del.df-del{background:#fadcdc;color:#932626;text-decoration:line-through;
       <h2>자동 적재 현황</h2>
       <div class="info" id="auto-status">시스템이 자동으로 법령을 적재하고 개정을 확인합니다.</div>
       <div class="muted" id="auto-detail"></div>
-      <div class="row" style="margin:14px 0 0">
+      <div class="row hide" style="margin:14px 0 0" id="row-check-now">
         <button class="b g" id="btn-check-now">지금 개정 확인</button>
         <span class="muted" id="cn-msg">스케줄러를 기다리지 않고 판본 대조를 한 번 돌립니다.
           감시 법령 전체를 훑으므로 수 분 걸립니다.</span>
@@ -194,13 +200,19 @@ del.df-del{background:#fadcdc;color:#932626;text-decoration:line-through;
           <option value="행정규칙">행정규칙</option>
           <option value="정보시스템 운영">정보시스템 운영</option>
         </select>
+        <select id="wa-target" class="hide">
+          <option value="dept">부서 목록에 추가 (부서원 전체)</option>
+          <option value="personal">나만 보기 (개인 추가)</option>
+        </select>
         <button class="b" id="btn-w-add">추가</button>
         <span class="muted" id="wa-msg"></span>
       </div>
+      <div class="muted" id="wa-help"></div>
       <div class="muted">추가한 법령의 전문은 다음 판본 대조(매일 지정 시각) 또는 서버 재시작 때
         수집됩니다. 아래 <b>상태</b> 표시는 서버 재시작 후에 갱신되므로, 전문이 이미 들어왔는데도
         한동안 <b>미적재</b>로 보일 수 있습니다 — 실제 수집 여부는 <b>법령 전문</b> 탭에서 확인하세요.
-        검색이 안 되면 정식 명칭으로 고쳐 다시 추가하세요.</div>
+        검색이 안 되면 정식 명칭으로 고쳐 다시 추가하세요.
+        이미 다른 부서가 보고 있는 법령이면 새로 수집하지 않고 과거 이력까지 바로 보입니다.</div>
     </div>
     <div class="panel">
       <div class="row">
@@ -210,9 +222,10 @@ del.df-del{background:#fadcdc;color:#932626;text-decoration:line-through;
       </div>
       <table>
         <thead><tr><th>법령명</th><th style="width:110px">소관부처</th>
-          <th style="width:80px">구분</th><th style="width:90px">상태</th>
+          <th style="width:80px">구분</th><th style="width:78px">출처</th>
+          <th style="width:90px">상태</th>
           <th style="width:150px">마지막 갱신</th>
-          <th style="width:64px">감시</th><th style="width:74px"></th></tr></thead>
+          <th style="width:64px">보기</th><th style="width:110px"></th></tr></thead>
         <tbody id="w-body"></tbody>
       </table>
     </div>
@@ -280,7 +293,68 @@ del.df-del{background:#fadcdc;color:#932626;text-decoration:line-through;
     </div>
   </section>
 
+  <section id="tab-accounts" class="hide">
+    <div class="panel" id="pan-dept">
+      <h2>부서</h2>
+      <div class="row">
+        <input id="dp-name" placeholder="부서 이름 (예: 법무팀)" style="min-width:200px">
+        <button class="b" id="btn-dp-add">부서 추가</button>
+        <span class="muted" id="dp-msg"></span>
+      </div>
+      <div class="muted">부서를 먼저 만들고 계정을 붙입니다. 부서 관리자는 자기 부서의
+        감시 법령 목록과 계정을 관리하고, 일반 사용자는 그 목록을 따릅니다.</div>
+      <table>
+        <thead><tr><th>부서</th><th style="width:90px">인원</th>
+          <th style="width:110px">감시 법령</th></tr></thead>
+        <tbody id="dp-body"></tbody>
+      </table>
+    </div>
+    <div class="panel">
+      <h2>계정 추가</h2>
+      <div class="row">
+        <input id="ua-email" placeholder="이메일" style="min-width:200px">
+        <input id="ua-name" placeholder="이름" style="min-width:110px">
+        <input id="ua-pw" type="password" placeholder="비밀번호 (8자 이상)" style="min-width:170px">
+        <select id="ua-dept" style="min-width:130px"></select>
+        <select id="ua-role">
+          <option value="member">일반 사용자</option>
+          <option value="dept_admin">부서 관리자</option>
+          <option value="superadmin" class="hide" id="ua-role-super">전사 관리자</option>
+        </select>
+        <button class="b" id="btn-ua-add">추가</button>
+        <span class="muted" id="ua-msg"></span>
+      </div>
+      <div class="muted">일반 사용자는 감시 법령을 추가·삭제할 수 없고, 개인 중지와
+        본인만 보는 개인 추가는 할 수 있습니다. 문서 검사·법령 조회·개정 확인은
+        모두 사용할 수 있습니다.</div>
+    </div>
+    <div class="panel">
+      <div class="row"><span class="muted" id="u-count"></span></div>
+      <table>
+        <thead><tr><th>이메일</th><th style="width:100px">이름</th>
+          <th style="width:120px">부서</th><th style="width:110px">등급</th>
+          <th style="width:150px">마지막 로그인</th>
+          <th style="width:74px">상태</th><th style="width:150px"></th></tr></thead>
+        <tbody id="u-body"></tbody>
+      </table>
+    </div>
+  </section>
+
   <section id="tab-settings" class="hide">
+    <div class="panel">
+      <h2>전사 감시 대상</h2>
+      <div class="muted">모든 부서·개인 목록의 합집합입니다. 여기서 지우면 모든 부서의
+        목록에서 함께 사라집니다 — 한 부서에서만 빼려면 그 부서 관리자가
+        <b>감시 법령</b> 탭에서 처리해야 합니다.
+        보는 곳이 하나도 없으면 수집이 자동으로 멈추고, 자료는 남습니다.</div>
+      <div class="row"><span class="muted" id="gw-count"></span></div>
+      <table>
+        <thead><tr><th>법령명</th><th style="width:110px">소관부처</th>
+          <th style="width:150px">보는 곳</th><th style="width:80px">수집</th>
+          <th style="width:100px"></th></tr></thead>
+        <tbody id="gw-body"></tbody>
+      </table>
+    </div>
     <div class="panel">
       <h2>API 키 설정</h2>
       <div class="info">여기서 입력한 값은 config.json에 저장되고 즉시 반영됩니다.
@@ -353,12 +427,59 @@ const $ = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
 const api = async (url, opt) => {
   const r = await fetch(url, opt);
+  // 세션이 끊기면(만료·로그아웃·계정 정지) 어느 화면에 있든 로그인으로 보낸다.
+  // 그러지 않으면 5초마다 도는 갱신이 조용히 실패하며 빈 화면만 남는다.
+  if (r.status === 401) { location.href = '/login'; throw new Error('로그인이 필요합니다'); }
   if (!r.ok) {
     let m = r.statusText;
     try { m = (await r.json()).detail || m; } catch (e) {}
     throw new Error(m);
   }
   return r.json();
+};
+const jpost = (url, body) => api(url, {method:'POST',
+  headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+
+// 로그인한 사용자. 등급에 따라 탭과 버튼이 갈린다.
+let ME = null;
+const RANK = {member:0, dept_admin:1, superadmin:2};
+const ROLE_KO = {member:'일반 사용자', dept_admin:'부서 관리자',
+                 superadmin:'전사 관리자'};
+const isAdmin = () => ME && RANK[ME.role] >= RANK.dept_admin;
+
+async function loadMe() {
+  ME = await api('/api/auth/me');
+  $('#me-box').innerHTML = `<b>${esc(ME.name || ME.email)}</b><br>` +
+    `<span style="opacity:.8">${esc(ME.dept_name || '소속 없음')} · ` +
+    `${ROLE_KO[ME.role] || ME.role}</span>`;
+  // 권한이 없는 탭은 아예 없앤다 — 눌러서 403을 보게 하는 것보다 낫다
+  $$('nav button[data-need]').forEach(b => {
+    if (RANK[ME.role] >= RANK[b.dataset.need]) b.classList.remove('hide');
+  });
+  // 전사 공용 작업이라 전사 관리자만 부를 수 있다. 눌러서 403을 보느니
+  // 처음부터 없는 편이 낫다.
+  $('#row-check-now').classList.toggle('hide', ME.role !== 'superadmin');
+  $('#wa-target').classList.toggle('hide', !isAdmin());
+  $('#wa-help').textContent = isAdmin()
+    ? '부서 목록에 넣으면 부서원 전체에게 보입니다. 나만 보기로 넣으면 본인 화면에만 뜹니다.'
+    : '여기서 추가한 법령은 본인 화면에만 보입니다. 부서 목록은 부서 관리자가 관리합니다.';
+}
+
+$('#btn-logout').onclick = async () => {
+  try { await jpost('/api/auth/logout'); } catch (e) {}
+  location.href = '/login';
+};
+
+$('#btn-pw').onclick = async () => {
+  const cur = prompt('현재 비밀번호');
+  if (!cur) return;
+  const nw = prompt('새 비밀번호 (8자 이상)');
+  if (!nw) return;
+  try {
+    const r = await jpost('/api/auth/password',
+                          {current_password: cur, new_password: nw});
+    alert(r.message); location.href = '/login';
+  } catch (e) { alert(e.message); }
 };
 const esc = s => String(s==null?'':s).replace(/[&<>"']/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -385,7 +506,8 @@ $$('nav button').forEach(b => b.onclick = () => {
   if (b.dataset.tab === 'laws') loadFulltext();
   if (b.dataset.tab === 'watch') loadWatch();
   if (b.dataset.tab === 'check') loadChecks();
-  if (b.dataset.tab === 'settings') loadSettings();
+  if (b.dataset.tab === 'accounts') loadAccounts();
+  if (b.dataset.tab === 'settings') { loadSettings(); loadGlobalWatch(); }
 });
 
 async function loadStats() {
@@ -571,8 +693,9 @@ async function openLaw(id, vk) {
         <div class="row" style="margin-bottom:0">
           <button class="b g" onclick="showDiff('${esc(d.law_id)}','${esc(v.version_key||'')}')"
             >판본 비교</button>
-          <button class="b g" onclick="recollect('${esc(d.law_id)}','${esc(v.title||'')}')"
-            >다시 수집</button>
+          ${ME.role === 'superadmin' ? `<button class="b g"
+            onclick="recollect('${esc(d.law_id)}','${esc(v.title||'')}')"
+            >다시 수집</button>` : ''}
           <button class="b g" onclick="closeM()">닫기</button>
         </div>
       </div>
@@ -845,39 +968,73 @@ function renderWatch() {
   const fm = $('#w-fministry').value;
   const rows = WATCH.filter(w =>
     (!q || w.name.includes(q)) && (!fm || w.ministry === fm));
-  $('#w-count').textContent = `${rows.length} / ${WATCH.length}건`;
-  $('#w-count').textContent += ` · 중지 ${WATCH.filter(w => !w.enabled).length}건`;
+  $('#w-count').textContent = `${rows.length} / ${WATCH.length}건`
+    + ` · 중지 ${WATCH.filter(w => w.muted).length}건`;
   $('#w-body').innerHTML = rows.map(w => {
     const st = STATUS_TAG[w.status] || ['-','t-none'];
-    // 중지된 행은 흐리게 — 목록에 남아 있지만 감시하지 않는다는 걸 눈으로 구분
-    return `<tr${w.enabled ? '' : ' style="opacity:.5"'}>
+    const mine = w.source === 'personal';
+    // 부서 관리자만 부서 목록에서 뺄 수 있다. 개인 추가분은 본인이 뺀다.
+    const del = mine
+      ? `<button class="b g" style="padding:3px 9px;font-size:12px;white-space:nowrap"
+           title="내가 추가한 법령을 목록에서 뺍니다"
+           onclick="delMine(${w.id},'${esc(w.name)}')">삭제</button>`
+      : (isAdmin()
+        ? `<button class="b g" style="padding:3px 9px;font-size:12px;white-space:nowrap"
+             title="부서 목록에서 뺍니다. 다른 부서가 보고 있으면 수집은 계속됩니다"
+             onclick="delFromDept(${w.id},'${esc(w.name)}')">부서에서 제외</button>`
+        : '<span class="muted" style="font-size:12px">부서 목록</span>');
+    // 숨긴 행은 흐리게 — 목록에 남아 있지만 내 화면에서 빠졌다는 걸 눈으로 구분
+    return `<tr${w.muted ? ' style="opacity:.5"' : ''}>
     <td>${esc(w.name)}</td>
     <td class="muted">${esc(w.ministry)}</td>
     <td class="muted">${esc(w.category)}</td>
+    <td class="muted">${mine ? '개인 추가' : '부서'}</td>
     <td><span class="tag ${st[1]}">${st[0]}</span></td>
     <td class="muted">${esc(w.last_updated ? w.last_updated.slice(0,16).replace('T',' ') : '-')}</td>
     <td><button class="b g" style="padding:3px 9px;font-size:12px;white-space:nowrap"
-      title="${w.enabled
-        ? '감시를 중지합니다. 지워지는 것은 없고 개정 확인 대상에서만 빠집니다'
-        : '감시를 재개합니다. 다음 개정 확인부터 다시 포함됩니다'}"
-      onclick="toggleWatch(${w.id},${!w.enabled})"
-      >${w.enabled ? '중지' : '재개'}</button></td>
-    <td><button class="b g" style="padding:3px 9px;font-size:12px;white-space:nowrap"
-      onclick="delWatch(${w.id},'${esc(w.name)}')">삭제</button></td>
+      title="${w.muted
+        ? '다시 보이게 합니다. 중지 기간의 개정도 함께 보입니다'
+        : '내 화면과 리포트에서만 뺍니다. 수집은 계속되고 남에게 영향이 없습니다'}"
+      onclick="muteWatch(${w.id},${!w.muted})"
+      >${w.muted ? '재개' : '중지'}</button></td>
+    <td>${del}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="7" class="muted">해당 법령이 없습니다.</td></tr>';
+  }).join('') || '<tr><td colspan="8" class="muted">해당 법령이 없습니다.</td></tr>';
 }
 
-// 감시 사용/중지 — 삭제하지 않고 수집·점검 대상에서만 빼 둔다.
-async function toggleWatch(id, enabled) {
+// 개인 중지 — 내 화면에서만 뺀다. 수집은 계속 돌고 남에게 영향이 없다.
+async function muteWatch(id, muted) {
   try {
-    const r = await api('/api/watchlist/' + id + '/toggle', {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({enabled})});
-    $('#wa-msg').textContent = enabled
-      ? `'${r.name}' 감시 재개 — 다음 개정 확인부터 포함됩니다`
-      : `'${r.name}' 감시 중지 — 전문과 개정 이력은 그대로 남습니다`;
+    await jpost('/api/my/watchlist/' + id + '/mute', {muted});
+    $('#wa-msg').textContent = muted
+      ? '중지했습니다 — 내 화면에서만 빠지며 수집은 계속됩니다'
+      : '다시 보이게 했습니다 — 중지 기간의 개정도 함께 보입니다';
     setTimeout(() => $('#wa-msg').textContent = '', 4000);
+    loadWatch(); loadStats();
+  } catch (e) { alert(e.message); }
+}
+
+// 개인 추가분 제거 — 부서 목록은 건드리지 않는다.
+async function delMine(id, name) {
+  if (!confirm(`'${name}'을(를) 내 목록에서 뺍니다.\n\n` +
+               `부서 목록에는 영향이 없고, 수집된 자료도 지워지지 않습니다.`)) return;
+  try {
+    await api('/api/my/watchlist/' + id, {method:'DELETE'});
+    loadWatch(); loadStats();
+  } catch (e) { alert(e.message); }
+}
+
+// 부서 목록에서 제거 — 다른 부서가 보고 있으면 수집은 계속된다.
+async function delFromDept(id, name) {
+  if (!confirm(`'${name}'을(를) 부서 목록에서 뺍니다.\n\n` +
+               `부서원 전체의 화면에서 사라집니다.\n` +
+               `전문·개정 이력·분석 결과는 지워지지 않습니다.`)) return;
+  try {
+    const r = await api('/api/dept/watchlist/' + id, {method:'DELETE'});
+    $('#wa-msg').textContent = r.collection_stopped
+      ? '부서 목록에서 뺐습니다 — 보는 곳이 없어 수집을 멈췄습니다(자료는 남습니다)'
+      : `부서 목록에서 뺐습니다 — 다른 ${r.remaining_subscribers}곳이 보고 있어 수집은 계속됩니다`;
+    setTimeout(() => $('#wa-msg').textContent = '', 6000);
     loadWatch(); loadStats();
   } catch (e) { alert(e.message); }
 }
@@ -887,15 +1044,18 @@ $('#w-fministry').onchange = renderWatch;
 $('#btn-w-add').onclick = async () => {
   const name = $('#wa-name').value.trim();
   if (!name) { $('#wa-msg').textContent = '법령명을 입력하세요'; return; }
+  // 일반 사용자에게는 대상 선택이 없다 — 개인 추가만 할 수 있다.
+  const toDept = isAdmin() && $('#wa-target').value === 'dept';
+  const body = {name, ministry: $('#wa-ministry').value.trim(),
+                category: $('#wa-cat').value};
   try {
-    await api('/api/watchlist', {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name, ministry: $('#wa-ministry').value.trim(),
-                            category: $('#wa-cat').value})});
+    await jpost(toDept ? '/api/watchlist' : '/api/my/watchlist', body);
     $('#wa-name').value = ''; $('#wa-ministry').value = '';
-    $('#wa-msg').textContent = '추가됨';
+    $('#wa-msg').textContent = toDept
+      ? '부서 목록에 추가됨 — 부서원 전체에게 보입니다'
+      : '추가됨 — 본인 화면에만 보입니다';
     loadWatch(); loadStats();
-    setTimeout(() => $('#wa-msg').textContent = '', 2000);
+    setTimeout(() => $('#wa-msg').textContent = '', 4000);
   } catch (e) { $('#wa-msg').textContent = e.message; }
 };
 
@@ -971,6 +1131,108 @@ async function doDelWatch(id) {
     setTimeout(() => $('#wa-msg').textContent = '', 5000);
     loadWatch(); loadFulltext(); loadStats();
   } catch (e) { alert(e.message); }
+}
+
+// ── 계정 관리 ──
+let DEPTS = [];
+
+async function loadAccounts() {
+  // 부서 목록은 전사 관리자만 만들 수 있다. 부서 관리자에게는 패널을 숨긴다.
+  const su = ME.role === 'superadmin';
+  $('#pan-dept').classList.toggle('hide', !su);
+  // option은 hide 클래스로 가려도 키보드로 고를 수 있고 접근성 트리에도
+  // 남는다. 아예 떼어 낸다(서버도 403으로 막지만 화면이 먼저 맞아야 한다).
+  const sup = $('#ua-role-super');
+  if (sup && !su) sup.remove();
+  DEPTS = await api('/api/admin/departments');
+  $('#dp-body').innerHTML = DEPTS.map(d => `<tr>
+    <td>${esc(d.name)}</td><td class="muted">${d.user_count}명</td>
+    <td class="muted">${d.watch_count}건</td></tr>`).join('')
+    || '<tr><td colspan="3" class="muted">부서가 없습니다.</td></tr>';
+  // 부서 관리자는 자기 부서에만 계정을 만들 수 있으므로 선택지를 고정한다
+  $('#ua-dept').innerHTML = su
+    ? DEPTS.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join('')
+    : `<option value="${ME.dept_id}">${esc(ME.dept_name)}</option>`;
+  $('#ua-dept').disabled = !su;
+
+  const users = await api('/api/admin/users');
+  $('#u-count').textContent = `${users.length}명` +
+    ` · 정지 ${users.filter(u => !u.enabled).length}명`;
+  $('#u-body').innerHTML = users.map(u => `<tr${u.enabled ? '' : ' style="opacity:.5"'}>
+    <td>${esc(u.email)}</td><td>${esc(u.name)}</td>
+    <td class="muted">${esc(u.dept_name || '-')}</td>
+    <td class="muted">${ROLE_KO[u.role] || esc(u.role)}</td>
+    <td class="muted">${esc(u.last_login ? u.last_login.slice(0,16).replace('T',' ') : '없음')}</td>
+    <td>${u.enabled ? '<span class="tag t-relax">사용</span>'
+                    : '<span class="tag t-restrict">정지</span>'}</td>
+    <td>${u.id === ME.id ? '<span class="muted" style="font-size:12px">본인</span>' : `
+      <button class="b g" style="padding:3px 8px;font-size:12px"
+        onclick="toggleUser(${u.id},${!u.enabled},'${esc(u.email)}')"
+        >${u.enabled ? '정지' : '해제'}</button>
+      <button class="b g" style="padding:3px 8px;font-size:12px"
+        onclick="resetPw(${u.id},'${esc(u.email)}')">비번 재설정</button>`}</td>
+    </tr>`).join('') || '<tr><td colspan="7" class="muted">계정이 없습니다.</td></tr>';
+}
+
+$('#btn-dp-add').onclick = async () => {
+  const name = $('#dp-name').value.trim();
+  if (!name) { $('#dp-msg').textContent = '부서 이름을 입력하세요'; return; }
+  try {
+    await jpost('/api/admin/departments', {name});
+    $('#dp-name').value = ''; $('#dp-msg').textContent = '추가됨';
+    loadAccounts();
+    setTimeout(() => $('#dp-msg').textContent = '', 2000);
+  } catch (e) { $('#dp-msg').textContent = e.message; }
+};
+
+$('#btn-ua-add').onclick = async () => {
+  const email = $('#ua-email').value.trim();
+  const pw = $('#ua-pw').value;
+  if (!email || !pw) { $('#ua-msg').textContent = '이메일과 비밀번호를 입력하세요'; return; }
+  try {
+    await jpost('/api/admin/users', {
+      email, password: pw, name: $('#ua-name').value.trim(),
+      role: $('#ua-role').value, dept_id: Number($('#ua-dept').value) || null});
+    $('#ua-email').value = ''; $('#ua-pw').value = ''; $('#ua-name').value = '';
+    $('#ua-msg').textContent = '계정을 만들었습니다';
+    loadAccounts();
+    setTimeout(() => $('#ua-msg').textContent = '', 3000);
+  } catch (e) { $('#ua-msg').textContent = e.message; }
+};
+
+async function toggleUser(id, enabled, email) {
+  if (!enabled && !confirm(`${email} 계정을 정지합니다.\n\n` +
+      `열려 있는 세션이 즉시 끊기고 로그인할 수 없게 됩니다.\n` +
+      `계정과 기록은 지워지지 않으며 언제든 해제할 수 있습니다.`)) return;
+  try { await jpost(`/api/admin/users/${id}/toggle`, {enabled}); loadAccounts(); }
+  catch (e) { alert(e.message); }
+}
+
+async function resetPw(id, email) {
+  const nw = prompt(`${email}의 새 비밀번호 (8자 이상)`);
+  if (!nw) return;
+  try {
+    await jpost(`/api/admin/users/${id}/password`, {new_password: nw});
+    alert(`${email}의 비밀번호를 바꿨습니다. 그 계정의 세션은 모두 끊겼습니다.`);
+  } catch (e) { alert(e.message); }
+}
+
+// ── 전사 감시 대상 (전사 관리자) ──
+// 조회가 개인 목록으로 좁혀진 뒤로, 부서가 없는 전사 관리자는 감시 법령
+// 탭에서 아무것도 못 본다. 전역 토글·삭제의 대상은 여기서 본다.
+async function loadGlobalWatch() {
+  const rows = await api('/api/admin/watchlist');
+  $('#gw-count').textContent = `${rows.length}건 · ` +
+    `아무도 보지 않음 ${rows.filter(w => !w.subscribers).length}건`;
+  $('#gw-body').innerHTML = rows.map(w => `<tr${w.enabled ? '' : ' style="opacity:.5"'}>
+    <td>${esc(w.name)}</td>
+    <td class="muted">${esc(w.ministry)}</td>
+    <td class="muted">${w.dept_count}부서 / ${w.user_count}개인</td>
+    <td>${w.enabled ? '<span class="tag t-relax">수집</span>'
+                    : '<span class="tag t-none">중단</span>'}</td>
+    <td><button class="b g" style="padding:3px 9px;font-size:12px"
+      onclick="delWatch(${w.id},'${esc(w.name)}')">완전 삭제</button></td>
+    </tr>`).join('') || '<tr><td colspan="5" class="muted">감시 대상이 없습니다.</td></tr>';
 }
 
 // ── 설정 ──
@@ -1061,8 +1323,12 @@ $('#btn-check-now').onclick = async () => {
   pollJob();
 };
 
-loadStats();
-setInterval(loadStats, 5000);
+// 사용자를 먼저 읽어야 어떤 탭·버튼을 보일지 정해진다. 그 전에 화면을
+// 그리면 일반 사용자에게 관리 버튼이 잠깐 보였다가 사라진다.
+loadMe().then(() => {
+  loadStats();
+  setInterval(loadStats, 5000);
+});
 </script>
 </body>
 </html>

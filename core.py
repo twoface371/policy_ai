@@ -848,6 +848,47 @@ class Store:
         r = await self._fetch("SELECT id FROM users WHERE email=%s", (email,))
         return r[0][0] if r else None
 
+    async def get_user(self, user_id: int) -> Optional[Dict]:
+        r = await self._fetch(
+            "SELECT id,email,name,dept_id,role,enabled FROM users WHERE id=%s",
+            (user_id,))
+        if not r:
+            return None
+        u = r[0]
+        return {"id": u[0], "email": u[1], "name": u[2] or "",
+                "dept_id": u[3], "role": u[4], "enabled": bool(u[5])}
+
+    async def list_users(self, dept_id: Optional[int] = None) -> List[Dict]:
+        """계정 목록. dept_id를 주면 그 부서만.
+
+        비밀번호 해시는 넣지 않는다 — 화면으로 나갈 자료라 애초에 담지
+        않는 편이 낫다.
+        """
+        sql = ("SELECT u.id,u.email,u.name,u.dept_id,u.role,u.enabled,"
+               "       u.created_at,u.last_login,COALESCE(d.name,'')"
+               "  FROM users u LEFT JOIN departments d ON d.id=u.dept_id")
+        params: tuple = ()
+        if dept_id is not None:
+            sql += " WHERE u.dept_id=%s"
+            params = (dept_id,)
+        sql += " ORDER BY u.id"
+        return [{"id": r[0], "email": r[1], "name": r[2] or "",
+                 "dept_id": r[3], "role": r[4], "enabled": bool(r[5]),
+                 "created_at": r[6] or "", "last_login": r[7] or "",
+                 "dept_name": r[8]}
+                for r in await self._fetch(sql, params)]
+
+    async def set_user_enabled(self, user_id: int, enabled: bool):
+        """계정 정지/해제. 정지하면 열려 있던 세션도 함께 끊는다.
+
+        session_user가 매 요청 enabled를 보므로 세션을 남겨 둬도 막히지만,
+        정지된 계정의 세션 행이 만료까지 남아 있을 이유가 없다.
+        """
+        await self._exec("UPDATE users SET enabled=%s WHERE id=%s",
+                         (1 if enabled else 0, user_id))
+        if not enabled:
+            await self._exec("DELETE FROM sessions WHERE user_id=%s", (user_id,))
+
     async def authenticate(self, email: str, password: str) -> Optional[Dict]:
         """이메일·비밀번호 확인. 실패하면 None (이유는 구분해서 알리지 않는다).
 

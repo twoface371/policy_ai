@@ -200,6 +200,144 @@ async def api_me(request: Request):
     return current_user(request)
 
 
+MIN_PASSWORD = 8
+
+
+@api.post("/api/auth/password")
+async def api_change_password(request: Request, body: Dict = Body(...)):
+    """본인 비밀번호 변경. 현재 비밀번호를 함께 받는다.
+
+    세션 쿠키만으로 바꾸게 하면, 자리를 비운 사이 열린 브라우저를 만진
+    사람이 비밀번호를 갈아 끼우고 계정을 가져갈 수 있다.
+    """
+    user = current_user(request)
+    new = body.get("new_password") or ""
+    if len(new) < MIN_PASSWORD:
+        raise HTTPException(400, f"비밀번호는 {MIN_PASSWORD}자 이상이어야 합니다")
+    if not await store().authenticate(user["email"],
+                                      body.get("current_password") or ""):
+        raise HTTPException(403, "현재 비밀번호가 올바르지 않습니다")
+    # set_password가 세션을 전부 끊으므로 지금 쓰던 세션도 함께 죽는다.
+    # 새로 로그인해야 하며, 그게 의도한 동작이다.
+    await store().set_password(user["id"], new)
+    return {"ok": True, "message": "비밀번호를 바꿨습니다. 다시 로그인하세요."}
+
+
+# ============================================================
+# 계정·부서 관리
+# ============================================================
+@api.get("/api/admin/departments")
+async def api_dept_list(_: Dict = Depends(dept_admin_only)):
+    """부서 목록 + 인원·감시 법령 수. 계정을 만들 때 고를 대상이 된다."""
+    return await store().list_departments()
+
+
+@api.post("/api/admin/departments")
+async def api_dept_add(body: Dict = Body(...), _: Dict = Depends(super_only)):
+    """부서 생성. 부서를 먼저 만들고 계정을 붙이는 순서다.
+
+    계정을 만들 때 부서명을 받아 적는 방식이면 오타로 '법무팀'과
+    '법무 팀'이 갈라지고, 이름을 고치거나 인원을 옮길 방법이 없어진다.
+    """
+    dept_id = await store().add_department(body.get("name") or "")
+    if dept_id is None:
+        raise HTTPException(409, "이미 있는 부서이거나 이름이 비었습니다")
+    return {"ok": True, "id": dept_id}
+
+
+@api.get("/api/admin/users")
+async def api_user_list(request: Request,
+                        user: Dict = Depends(dept_admin_only)):
+    """계정 목록. 부서 관리자는 자기 부서만 본다."""
+    if user["role"] == "superadmin":
+        return await store().list_users()
+    return await store().list_users(dept_id=user["dept_id"])
+
+
+@api.post("/api/admin/users")
+async def api_user_add(body: Dict = Body(...),
+                       actor: Dict = Depends(dept_admin_only)):
+    """계정 생성.
+
+    전사 관리자는 부서를 골라 어떤 등급이든 만든다. 부서 관리자는 자기
+    부서에만, 자기보다 높지 않은 등급으로만 만든다 — 그러지 않으면 부서
+    관리자가 스스로 전사 권한을 발급할 수 있다.
+    """
+    email = (body.get("email") or "").strip().lower()
+    password = body.get("password") or ""
+    role = body.get("role") or "member"
+    if not email:
+        raise HTTPException(400, "이메일을 입력하세요")
+    if len(password) < MIN_PASSWORD:
+        raise HTTPException(400, f"비밀번호는 {MIN_PASSWORD}자 이상이어야 합니다")
+    if role not in ROLE_RANK:
+        raise HTTPException(400, "등급이 올바르지 않습니다")
+
+    if actor["role"] == "superadmin":
+        dept_id = body.get("dept_id")
+    else:
+        dept_id = actor["dept_id"]
+        if ROLE_RANK[role] > ROLE_RANK[actor["role"]]:
+            raise HTTPException(403, "자기보다 높은 등급은 만들 수 없습니다")
+    # 전사 관리자만 부서 없이 존재한다. 나머지는 소속이 있어야 목록이 정해진다.
+    if role != "superadmin" and not dept_id:
+        raise HTTPException(400, "부서를 지정하세요")
+
+    uid = await store().add_user(email, password, body.get("name") or "",
+                                 dept_id if role != "superadmin" else None, role)
+    if uid is None:
+        raise HTTPException(409, "이미 있는 이메일입니다")
+    return {"ok": True, "id": uid}
+
+
+def _may_manage(actor: Dict, target: Dict):
+    """대상 계정을 만질 수 있는지. 안 되면 예외를 던진다."""
+    if actor["role"] == "superadmin":
+        return
+    if target["dept_id"] != actor["dept_id"]:
+        raise HTTPException(403, "다른 부서의 계정입니다")
+    if ROLE_RANK.get(target["role"], 0) > ROLE_RANK[actor["role"]]:
+        raise HTTPException(403, "자기보다 높은 등급의 계정입니다")
+
+
+@api.post("/api/admin/users/{uid}/toggle")
+async def api_user_toggle(uid: int, body: Dict = Body(...),
+                          actor: Dict = Depends(dept_admin_only)):
+    """계정 정지/해제. 퇴사·휴직 처리를 삭제 대신 이것으로 한다.
+
+    삭제하면 그 사람이 추가한 개인 목록과 검사 결과의 소유자가 사라진다.
+    정지는 되돌릴 수 있고 기록이 남는다.
+    """
+    target = await store().get_user(uid)
+    if not target:
+        raise HTTPException(404, "해당 계정이 없습니다")
+    if target["id"] == actor["id"]:
+        raise HTTPException(400, "자기 계정은 정지할 수 없습니다")
+    _may_manage(actor, target)
+    enabled = bool(body.get("enabled"))
+    await store().set_user_enabled(uid, enabled)
+    return {"ok": True, "email": target["email"], "enabled": enabled}
+
+
+@api.post("/api/admin/users/{uid}/password")
+async def api_user_reset_password(uid: int, body: Dict = Body(...),
+                                  actor: Dict = Depends(dept_admin_only)):
+    """비밀번호 재설정 — 잊어버린 사람을 위한 경로.
+
+    관리자는 현재 비밀번호를 모르므로 확인 없이 덮어쓴다. 대신 대상의
+    세션이 전부 끊긴다(set_password가 처리한다).
+    """
+    target = await store().get_user(uid)
+    if not target:
+        raise HTTPException(404, "해당 계정이 없습니다")
+    _may_manage(actor, target)
+    new = body.get("new_password") or ""
+    if len(new) < MIN_PASSWORD:
+        raise HTTPException(400, f"비밀번호는 {MIN_PASSWORD}자 이상이어야 합니다")
+    await store().set_password(uid, new)
+    return {"ok": True, "email": target["email"]}
+
+
 # ============================================================
 # 백그라운드 작업 — 적재 (사용자가 트리거하지 않음)
 # ============================================================
@@ -522,10 +660,20 @@ async def login_page():
 # ============================================================
 @api.get("/api/stats")
 async def api_stats(request: Request):
+    """현황 숫자. 기본은 내 목록 기준이다.
+
+    전사 관리자는 소속 부서가 없어 개인 목록이 비므로, 그대로 두면
+    107건을 수집 중인데도 화면이 전부 0으로 보인다. 고장으로 오해할
+    숫자라 이 경우만 전사 기준으로 낸다.
+    """
     user = current_user(request)
-    s = await store().stats(await store().visible_law_ids(user["id"]))
-    wl = [w for w in await store().list_user_watch(user["id"])
-          if not w["muted"]]
+    if user["role"] == "superadmin" and not user["dept_id"]:
+        s = await store().stats()
+        wl = await store().list_watch()
+    else:
+        s = await store().stats(await store().visible_law_ids(user["id"]))
+        wl = [w for w in await store().list_user_watch(user["id"])
+              if not w["muted"]]
     s["watch_total"] = len(wl)
     s["watch_loaded"] = sum(1 for w in wl if w["status"] == "loaded")
     s["watch_pending"] = sum(1 for w in wl if w["status"] == "pending")
