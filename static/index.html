@@ -472,15 +472,18 @@ $('#btn-logout').onclick = async () => {
 };
 
 $('#btn-pw').onclick = async () => {
-  const cur = prompt('현재 비밀번호');
-  if (!cur) return;
-  const nw = prompt('새 비밀번호 (8자 이상)');
-  if (!nw) return;
+  const v = await ask({
+    title: '비밀번호 변경', ok: '변경',
+    desc: '바꾸면 열려 있는 세션이 모두 끊기고 다시 로그인해야 합니다.',
+    fields: [{id:'cur', label:'현재 비밀번호', type:'password'},
+             {id:'nw',  label:'새 비밀번호 (8자 이상)', type:'password'}]});
+  if (!v) return;
   try {
     const r = await jpost('/api/auth/password',
-                          {current_password: cur, new_password: nw});
-    alert(r.message); location.href = '/login';
-  } catch (e) { alert(e.message); }
+                          {current_password: v.cur, new_password: v.nw});
+    await notify('비밀번호를 바꿨습니다', esc(r.message));
+    location.href = '/login';
+  } catch (e) { notify('바꾸지 못했습니다', esc(e.message), true); }
 };
 const esc = s => String(s==null?'':s).replace(/[&<>"']/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -621,6 +624,64 @@ async function openChange(mst) {
     </div></div>`;
 }
 const closeM = () => $('#modal').innerHTML = '';
+
+// ── 입력·확인 대화상자 ──
+// prompt()/confirm()/alert()을 쓰지 않는다. 내장 뷰어나 대화상자를 막아 둔
+// 브라우저에서는 네이티브 창이 아예 뜨지 않아 버튼이 먹통처럼 보인다.
+// 화면 안에서 처리하면 그 문제가 없고, 비밀번호를 가려 받을 수도 있다.
+//
+// fields: [{id, label, type:'text'|'password'|'select', value, options:[{value,label}]}]
+// desc는 호출부가 만든 HTML을 그대로 넣는다 — 변수는 esc()를 거쳐서 넘길 것.
+// 취소하면 null, 확인하면 {id: 값} 객체를 준다(필드가 없으면 빈 객체).
+function ask({title, desc = '', fields = [], ok = '확인',
+              danger = false, cancel = true}) {
+  return new Promise(resolve => {
+    const body = fields.map(f => {
+      const lab = `<label for="ask-${f.id}" style="display:block;margin:14px 0 5px;
+        font-size:13px;color:#555">${esc(f.label)}</label>`;
+      if (f.type === 'select')
+        return lab + `<select id="ask-${f.id}" style="width:100%">${
+          f.options.map(o => `<option value="${esc(o.value)}">${esc(o.label)}</option>`)
+            .join('')}</select>`;
+      return lab + `<input id="ask-${f.id}" type="${f.type || 'text'}"
+        value="${esc(f.value || '')}" style="width:100%"
+        ${f.type === 'password' ? 'autocomplete="new-password"' : ''}>`;
+    }).join('');
+    $('#modal').innerHTML = `<div class="modal"
+        onclick="if(event.target===this)document.getElementById('ask-cancel')?.click()">
+      <div style="max-width:460px">
+        <h2 style="${danger ? 'color:#9E1B32' : 'color:#1F3864'}">${esc(title)}</h2>
+        ${desc ? `<div class="muted" style="margin-top:10px;line-height:1.8">${desc}</div>` : ''}
+        ${body}
+        <div class="row" style="margin:22px 0 0;justify-content:flex-end">
+          ${cancel ? '<button class="b g" id="ask-cancel">취소</button>' : ''}
+          <button class="b" id="ask-ok">${esc(ok)}</button>
+        </div>
+      </div></div>`;
+    const done = v => { closeM(); resolve(v); };
+    if (cancel) $('#ask-cancel').onclick = () => done(null);
+    $('#ask-ok').onclick = () => {
+      const out = {};
+      for (const f of fields) out[f.id] = $('#ask-' + f.id).value;
+      done(out);
+    };
+    // 입력이 하나뿐일 때 엔터로 끝낼 수 있어야 한다
+    $$('#modal input').forEach(el => el.onkeydown = e => {
+      if (e.key === 'Enter') { e.preventDefault(); $('#ask-ok').click(); }
+      if (e.key === 'Escape' && cancel) $('#ask-cancel').click();
+    });
+    const first = $('#modal input, #modal select');
+    if (first) first.focus();
+  });
+}
+
+// 예/아니오만 묻는다. 확인이면 true.
+const confirmM = (title, desc, ok = '확인', danger = false) =>
+  ask({title, desc, ok, danger}).then(v => v !== null);
+
+// 알리기만 한다. alert() 대체.
+const notify = (title, desc = '', danger = false) =>
+  ask({title, desc, ok: '확인', cancel: false, danger});
 
 function dl(fmt) {
   const p = new URLSearchParams({
@@ -764,16 +825,17 @@ async function showDiff(id, vk) {
 // 지금 있는 전문을 버리고 법제처에서 새로 받게 만든다.
 // 파싱이 깨졌거나(본문없음) 파서를 고친 뒤 다시 파싱할 때 쓰는 경로다.
 async function recollect(id, title) {
-  if (!confirm(`'${title}' 의 전문을 버리고 법제처에서 다시 받을까요?\n\n`
-    + '· 지금 저장된 전문·판본·조항·부칙이 지워지고 상태가 "미적재"가 됩니다.\n'
-    + '· 다음 개정 확인(또는 서버 재시작) 때 자동으로 새로 받아옵니다.\n'
-    + '  「현황」 탭의 "지금 개정 확인"을 누르면 바로 받아올 수 있습니다.\n'
-    + '· 개정 이력과 AI 분석 결과는 지워지지 않습니다.\n\n'
-    + '받아오기 전까지는 이 법령의 전문을 볼 수 없습니다.')) return;
+  if (!await confirmM(`'${title}' 전문 다시 받기`,
+    '· 지금 저장된 전문·판본·조항·부칙이 지워지고 상태가 "미적재"가 됩니다.<br>'
+    + '· 다음 개정 확인(또는 서버 재시작) 때 자동으로 새로 받아옵니다.<br>'
+    + '&nbsp;&nbsp;「현황」 탭의 "지금 개정 확인"을 누르면 바로 받아올 수 있습니다.<br>'
+    + '· 개정 이력과 AI 분석 결과는 지워지지 않습니다.<br><br>'
+    + '<b>받아오기 전까지는 이 법령의 전문을 볼 수 없습니다.</b>',
+    '다시 받기', true)) return;
   try {
     await api('/api/fulltext/' + encodeURIComponent(id), {method:'DELETE'});
     closeM(); loadFulltext(); loadStats();
-  } catch (e) { alert(e.message); }
+  } catch (e) { notify('오류', esc(e.message), true); }
 }
 
 // ── 문서 검사 ──
@@ -1012,24 +1074,25 @@ async function muteWatch(id, muted) {
       : '다시 보이게 했습니다 — 중지 기간의 개정도 함께 보입니다';
     setTimeout(() => $('#wa-msg').textContent = '', 4000);
     loadWatch(); loadStats();
-  } catch (e) { alert(e.message); }
+  } catch (e) { notify('오류', esc(e.message), true); }
 }
 
 // 개인 추가분 제거 — 부서 목록은 건드리지 않는다.
 async function delMine(id, name) {
-  if (!confirm(`'${name}'을(를) 내 목록에서 뺍니다.\n\n` +
-               `부서 목록에는 영향이 없고, 수집된 자료도 지워지지 않습니다.`)) return;
+  if (!await confirmM(`'${name}' 내 목록에서 빼기`,
+    '부서 목록에는 영향이 없고, 수집된 자료도 지워지지 않습니다.', '빼기')) return;
   try {
     await api('/api/my/watchlist/' + id, {method:'DELETE'});
     loadWatch(); loadStats();
-  } catch (e) { alert(e.message); }
+  } catch (e) { notify('오류', esc(e.message), true); }
 }
 
 // 부서 목록에서 제거 — 다른 부서가 보고 있으면 수집은 계속된다.
 async function delFromDept(id, name) {
-  if (!confirm(`'${name}'을(를) 부서 목록에서 뺍니다.\n\n` +
-               `부서원 전체의 화면에서 사라집니다.\n` +
-               `전문·개정 이력·분석 결과는 지워지지 않습니다.`)) return;
+  if (!await confirmM(`'${name}' 부서 목록에서 빼기`,
+    '<b>부서원 전체</b>의 화면에서 사라집니다.<br>'
+    + '다른 부서·개인이 보고 있으면 수집은 계속됩니다.<br>'
+    + '전문·개정 이력·분석 결과는 지워지지 않습니다.', '빼기', true)) return;
   try {
     const r = await api('/api/dept/watchlist/' + id, {method:'DELETE'});
     $('#wa-msg').textContent = r.collection_stopped
@@ -1037,7 +1100,7 @@ async function delFromDept(id, name) {
       : `부서 목록에서 뺐습니다 — 다른 ${r.remaining_subscribers}곳이 보고 있어 수집은 계속됩니다`;
     setTimeout(() => $('#wa-msg').textContent = '', 6000);
     loadWatch(); loadStats();
-  } catch (e) { alert(e.message); }
+  } catch (e) { notify('오류', esc(e.message), true); }
 }
 $('#w-filter').oninput = renderWatch;
 $('#w-fministry').onchange = renderWatch;
@@ -1066,7 +1129,7 @@ async function delWatch(id, name) {
   let d;
   try {
     d = await api('/api/watchlist/' + id + '/data');
-  } catch (e) { alert(e.message); return; }
+  } catch (e) { notify('오류', esc(e.message), true); return; }
   const s = d.data || {};
   const has = (s.versions || 0) + (s.articles || 0) + (s.addenda || 0) > 0;
   const keep = (s.changes || 0) + (s.analyses || 0) > 0;
@@ -1131,7 +1194,7 @@ async function doDelWatch(id) {
       : `'${r.name}' 삭제됨 (전문은 보존)`;
     setTimeout(() => $('#wa-msg').textContent = '', 5000);
     loadWatch(); loadFulltext(); loadStats();
-  } catch (e) { alert(e.message); }
+  } catch (e) { notify('오류', esc(e.message), true); }
 }
 
 // ── 계정 관리 ──
@@ -1214,79 +1277,88 @@ $('#btn-ua-add').onclick = async () => {
 };
 
 async function toggleUser(id, enabled, email) {
-  if (!enabled && !confirm(`${email} 계정을 정지합니다.\n\n` +
-      `열려 있는 세션이 즉시 끊기고 로그인할 수 없게 됩니다.\n` +
-      `계정과 기록은 지워지지 않으며 언제든 해제할 수 있습니다.`)) return;
+  if (!enabled && !await confirmM(`${email} 계정 정지`,
+    '열려 있는 세션이 즉시 끊기고 로그인할 수 없게 됩니다.<br>'
+    + '계정과 기록은 지워지지 않으며 언제든 해제할 수 있습니다.', '정지', true)) return;
   try { await jpost(`/api/admin/users/${id}/toggle`, {enabled}); loadAccounts(); }
-  catch (e) { alert(e.message); }
+  catch (e) { notify('오류', esc(e.message), true); }
 }
 
 async function renameDept(id, cur) {
-  const name = prompt('새 부서 이름', cur);
-  if (!name || name === cur) return;
+  const v = await ask({
+    title: '부서 이름 변경', ok: '변경',
+    desc: '인원과 감시 법령 목록은 그대로 남습니다.',
+    fields: [{id:'name', label:'새 이름', value: cur}]});
+  if (!v || !v.name.trim() || v.name === cur) return;
   try {
-    await jpost(`/api/admin/departments/${id}/rename`, {name});
+    await jpost(`/api/admin/departments/${id}/rename`, {name: v.name});
     loadAccounts(); loadMe();   // 헤더의 소속 표시도 따라 바뀌어야 한다
-  } catch (e) { alert(e.message); }
+  } catch (e) { notify('바꾸지 못했습니다', esc(e.message), true); }
 }
 
 // 부서 삭제 — 인원이 있으면 옮길 곳을 먼저 받는다. 소속 없는 계정이
 // 되면 로그인해도 빈 목록만 보인다.
 async function delDept(id, name, users, watches) {
-  let to = null;
-  if (users > 0) {
-    const opts = DEPTS.filter(d => d.id !== id);
-    if (!opts.length) {
-      alert(`'${name}'에 ${users}명이 있는데 옮길 다른 부서가 없습니다.\n` +
-            `부서를 먼저 만들거나 인원을 정리하세요.`);
-      return;
-    }
-    const pick = prompt(`'${name}'의 ${users}명을 옮길 부서 번호\n\n` +
-      opts.map(d => `${d.id}: ${d.name}`).join('\n'), String(opts[0].id));
-    if (!pick) return;
-    to = DEPTS.find(d => d.id === Number(pick));
-    if (!to) { alert('그런 부서 번호가 없습니다'); return; }
+  const opts = DEPTS.filter(d => d.id !== id);
+  if (users > 0 && !opts.length) {
+    notify('지울 수 없습니다',
+      `<b>${esc(name)}</b>에 ${users}명이 있는데 옮길 다른 부서가 없습니다.<br>` +
+      `부서를 먼저 만들거나 인원을 정리하세요.`, true);
+    return;
   }
-  if (!confirm(`'${name}' 부서를 지웁니다.\n\n` +
-      (users ? `인원 ${users}명 → '${to.name}'(으)로 이동\n` : '인원 없음\n') +
-      `부서 감시 법령 ${watches}건이 이 부서 목록에서 빠집니다.\n` +
-      `다른 부서·개인이 보고 있는 법령은 수집이 계속됩니다.\n` +
-      `전문·개정 이력·분석 결과는 지워지지 않습니다.`)) return;
+  const desc =
+    (users ? `소속 ${users}명을 다른 부서로 옮기면서 지웁니다.<br>`
+           : `소속 인원이 없습니다.<br>`) +
+    `부서 감시 법령 <b>${watches}건</b>이 이 부서 목록에서 빠집니다.<br>` +
+    `다른 부서·개인이 보고 있는 법령은 <b>수집이 계속됩니다.</b><br>` +
+    `전문·개정 이력·분석 결과는 지워지지 않습니다.`;
+  const v = await ask({
+    title: `'${name}' 부서 삭제`, desc, ok: '삭제', danger: true,
+    fields: users > 0 ? [{id:'to', label:`${users}명을 옮길 부서`, type:'select',
+                          options: opts.map(d => ({value:d.id, label:d.name}))}] : []});
+  if (!v) return;
   try {
-    const q = to ? '?reassign_to=' + to.id : '';
+    const q = users > 0 ? '?reassign_to=' + Number(v.to) : '';
     const r = await api(`/api/admin/departments/${id}${q}`, {method:'DELETE'});
     $('#dp-msg').textContent = `'${r.name}' 삭제 — 인원 ${r.moved_users}명 이동` +
       (r.collection_stopped ? `, ${r.collection_stopped}건 수집 중단(자료는 보존)` : '');
     setTimeout(() => $('#dp-msg').textContent = '', 6000);
     loadAccounts(); loadStats();
-  } catch (e) { alert(e.message); }
+  } catch (e) { notify('지우지 못했습니다', esc(e.message), true); }
 }
 
 async function moveUser(id, email, curDept) {
   const opts = DEPTS.filter(d => d.id !== curDept);
-  if (!opts.length) { alert('옮길 다른 부서가 없습니다. 부서를 먼저 만드세요.'); return; }
-  const pick = prompt(`${email}을(를) 옮길 부서 번호\n\n` +
-    opts.map(d => `${d.id}: ${d.name}`).join('\n'), String(opts[0].id));
-  if (!pick) return;
-  const dept = DEPTS.find(d => d.id === Number(pick));
-  if (!dept) { alert('그런 부서 번호가 없습니다'); return; }
-  if (!confirm(`${email}을(를) '${dept.name}'(으)로 옮깁니다.\n\n` +
-      `감시 목록이 새 부서의 것으로 바뀝니다.\n` +
-      `본인이 추가한 법령은 따라가고, 중지해 둔 표시는 지워집니다.`)) return;
+  if (!opts.length) {
+    notify('옮길 부서가 없습니다', '다른 부서를 먼저 만드세요.', true); return;
+  }
+  const v = await ask({
+    title: '부서 이동', ok: '이동',
+    desc: `<b>${esc(email)}</b>의 감시 목록이 새 부서의 것으로 바뀝니다.<br>` +
+          `본인이 추가한 법령은 따라가고, 중지해 둔 표시는 지워집니다.`,
+    fields: [{id:'dept', label:'옮길 부서', type:'select',
+              options: opts.map(d => ({value:d.id, label:d.name}))}]});
+  if (!v) return;
   try {
-    const r = await jpost(`/api/admin/users/${id}/dept`, {dept_id: dept.id});
+    const r = await jpost(`/api/admin/users/${id}/dept`,
+                          {dept_id: Number(v.dept)});
     loadAccounts();
-    alert(`${r.email} → ${r.dept_name}`);
-  } catch (e) { alert(e.message); }
+    notify('부서를 옮겼습니다', `${esc(r.email)} → <b>${esc(r.dept_name)}</b>`);
+  } catch (e) { notify('옮기지 못했습니다', esc(e.message), true); }
 }
 
 async function resetPw(id, email) {
-  const nw = prompt(`${email}의 새 비밀번호 (8자 이상)`);
-  if (!nw) return;
+  const v = await ask({
+    title: '비밀번호 재설정', ok: '재설정',
+    desc: `<b>${esc(email)}</b>의 비밀번호를 새로 정합니다.<br>` +
+          `그 계정의 열린 세션은 모두 끊깁니다.`,
+    fields: [{id:'nw', label:'새 비밀번호 (8자 이상)', type:'password'}]});
+  if (!v) return;
   try {
-    await jpost(`/api/admin/users/${id}/password`, {new_password: nw});
-    alert(`${email}의 비밀번호를 바꿨습니다. 그 계정의 세션은 모두 끊겼습니다.`);
-  } catch (e) { alert(e.message); }
+    await jpost(`/api/admin/users/${id}/password`, {new_password: v.nw});
+    notify('비밀번호를 바꿨습니다',
+           `<b>${esc(email)}</b>에게 새 비밀번호를 전달하세요.`);
+  } catch (e) { notify('바꾸지 못했습니다', esc(e.message), true); }
 }
 
 // ── 전사 감시 대상 (전사 관리자) ──
@@ -1346,8 +1418,10 @@ $('#btn-set-save').onclick = async () => {
 };
 
 $('#btn-reanalyze').onclick = async () => {
-  if (!confirm('규칙 기반으로 분석된 개정 건을 지금 AI로 다시 분석합니다.\n'
-    + '(AI 키가 설정돼 있어야 하며, 건수만큼 API 비용이 듭니다)')) return;
+  if (!await confirmM('AI로 다시 분석',
+    '규칙 기반으로 분석된 개정 건을 지금 AI로 다시 분석합니다.<br>'
+    + '<b>건수만큼 API 비용이 듭니다.</b> (AI 키가 설정돼 있어야 합니다)',
+    '다시 분석', true)) return;
   $('#btn-reanalyze').disabled = true;
   $('#set-msg').textContent = 'AI로 다시 분석 중… (건수가 많으면 시간이 걸립니다)';
   try {
