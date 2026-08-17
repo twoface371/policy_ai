@@ -306,7 +306,7 @@ del.df-del{background:#fadcdc;color:#932626;text-decoration:line-through;
       <table>
         <thead><tr><th>부서</th><th style="width:90px">인원</th>
           <th style="width:110px">감시 법령</th>
-          <th style="width:100px"></th></tr></thead>
+          <th style="width:150px"></th></tr></thead>
         <tbody id="dp-body"></tbody>
       </table>
     </div>
@@ -1150,7 +1150,10 @@ async function loadAccounts() {
     <td>${esc(d.name)}</td><td class="muted">${d.user_count}명</td>
     <td class="muted">${d.watch_count}건</td>
     <td><button class="b g" style="padding:3px 8px;font-size:12px"
-      onclick="renameDept(${d.id},'${esc(d.name)}')">이름 변경</button></td>
+      onclick="renameDept(${d.id},'${esc(d.name)}')">이름 변경</button>
+      <button class="b g" style="padding:3px 8px;font-size:12px"
+      onclick="delDept(${d.id},'${esc(d.name)}',${d.user_count},${d.watch_count})"
+      >삭제</button></td>
     </tr>`).join('')
     || '<tr><td colspan="4" class="muted">부서가 없습니다.</td></tr>';
   // 부서 관리자는 자기 부서에만 계정을 만들 수 있으므로 선택지를 고정한다
@@ -1224,6 +1227,38 @@ async function renameDept(id, cur) {
   try {
     await jpost(`/api/admin/departments/${id}/rename`, {name});
     loadAccounts(); loadMe();   // 헤더의 소속 표시도 따라 바뀌어야 한다
+  } catch (e) { alert(e.message); }
+}
+
+// 부서 삭제 — 인원이 있으면 옮길 곳을 먼저 받는다. 소속 없는 계정이
+// 되면 로그인해도 빈 목록만 보인다.
+async function delDept(id, name, users, watches) {
+  let to = null;
+  if (users > 0) {
+    const opts = DEPTS.filter(d => d.id !== id);
+    if (!opts.length) {
+      alert(`'${name}'에 ${users}명이 있는데 옮길 다른 부서가 없습니다.\n` +
+            `부서를 먼저 만들거나 인원을 정리하세요.`);
+      return;
+    }
+    const pick = prompt(`'${name}'의 ${users}명을 옮길 부서 번호\n\n` +
+      opts.map(d => `${d.id}: ${d.name}`).join('\n'), String(opts[0].id));
+    if (!pick) return;
+    to = DEPTS.find(d => d.id === Number(pick));
+    if (!to) { alert('그런 부서 번호가 없습니다'); return; }
+  }
+  if (!confirm(`'${name}' 부서를 지웁니다.\n\n` +
+      (users ? `인원 ${users}명 → '${to.name}'(으)로 이동\n` : '인원 없음\n') +
+      `부서 감시 법령 ${watches}건이 이 부서 목록에서 빠집니다.\n` +
+      `다른 부서·개인이 보고 있는 법령은 수집이 계속됩니다.\n` +
+      `전문·개정 이력·분석 결과는 지워지지 않습니다.`)) return;
+  try {
+    const q = to ? '?reassign_to=' + to.id : '';
+    const r = await api(`/api/admin/departments/${id}${q}`, {method:'DELETE'});
+    $('#dp-msg').textContent = `'${r.name}' 삭제 — 인원 ${r.moved_users}명 이동` +
+      (r.collection_stopped ? `, ${r.collection_stopped}건 수집 중단(자료는 보존)` : '');
+    setTimeout(() => $('#dp-msg').textContent = '', 6000);
+    loadAccounts(); loadStats();
   } catch (e) { alert(e.message); }
 }
 

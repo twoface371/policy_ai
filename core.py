@@ -836,6 +836,55 @@ class Store:
                          (name, dept_id))
         return True
 
+    async def dept_member_count(self, dept_id: int) -> int:
+        r = await self._fetch("SELECT COUNT(*) FROM users WHERE dept_id=%s",
+                              (dept_id,))
+        return int(r[0][0]) if r else 0
+
+    async def dept_watch_ids(self, dept_id: int) -> List[int]:
+        """이 부서가 보고 있는 watch_id들.
+
+        부서를 지우기 *전에* 받아 둬야 한다. dept_watch가 CASCADE로 함께
+        날아간 뒤에는 어떤 법령의 구독자가 줄었는지 알 방법이 없다.
+        """
+        return [r[0] for r in await self._fetch(
+            "SELECT watch_id FROM dept_watch WHERE dept_id=%s", (dept_id,))]
+
+    async def reassign_dept_members(self, from_id: int, to_id: int) -> int:
+        """부서 인원을 통째로 다른 부서로 옮기고 옮긴 수를 준다.
+
+        숨김을 지우는 이유는 set_user_dept와 같다 — 이전 부서 목록을 보고
+        숨겨 둔 표시가 새 부서에서 되살아나면 안 된다.
+        """
+        n = await self.dept_member_count(from_id)
+        if not n:
+            return 0
+        await self._exec(
+            "DELETE FROM user_watch_mute WHERE user_id IN "
+            "(SELECT id FROM users WHERE dept_id=%s)", (from_id,))
+        await self._exec("UPDATE users SET dept_id=%s WHERE dept_id=%s",
+                         (to_id, from_id))
+        return n
+
+    async def delete_department(self, dept_id: int) -> List[int]:
+        """부서를 지우고, 수집이 멈춘 법령의 watch_id들을 돌려준다.
+
+        dept_watch는 FK CASCADE로 함께 사라진다. 그 뒤 각 법령의 구독자를
+        다시 세어 0이 된 것만 전역 수집을 내린다. 이 과정을 건너뛰면 아무도
+        보지 않는 법령을 계속 수집하게 된다.
+
+        전문·개정 이력·분석은 지우지 않는다 — 다른 삭제 경로와 같은 원칙이다.
+        """
+        watch_ids = await self.dept_watch_ids(dept_id)
+        await self._exec("DELETE FROM departments WHERE id=%s", (dept_id,))
+        stopped = []
+        for wid in watch_ids:
+            if await self.watch_subscriber_count(wid) == 0:
+                await self._exec("UPDATE watchlist SET enabled=0 WHERE id=%s",
+                                 (wid,))
+                stopped.append(wid)
+        return stopped
+
     # ---------- 계정 ----------
     async def set_user_dept(self, user_id: int, dept_id: int):
         """인원을 다른 부서로 옮긴다.

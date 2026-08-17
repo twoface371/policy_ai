@@ -259,6 +259,41 @@ async def api_dept_rename(did: int, body: Dict = Body(...),
     return {"ok": True, "name": name}
 
 
+@api.delete("/api/admin/departments/{did}")
+async def api_dept_del(did: int, reassign_to: Optional[int] = None,
+                       _: Dict = Depends(super_only)):
+    """부서 삭제.
+
+    소속 인원이 있으면 거부한다. 소속 없는 계정이 되면 로그인해도 빈 목록만
+    보이고 되돌리기도 번거롭다. reassign_to를 주면 인원을 그 부서로 함께
+    옮기면서 지운다 — 20명짜리 부서를 한 명씩 옮기게 하지 않으려는 것이다.
+
+    부서 감시 목록은 함께 사라지지만, 그 법령을 보는 다른 부서·개인이
+    있으면 수집은 계속된다. 아무도 안 보게 된 것만 수집을 멈추고, 그때도
+    전문·개정 이력·분석은 남긴다.
+    """
+    dept = await store().get_department(did)
+    if not dept:
+        raise HTTPException(404, "해당 부서가 없습니다")
+
+    moved = 0
+    members = await store().dept_member_count(did)
+    if members:
+        if not reassign_to:
+            raise HTTPException(
+                409, f"소속 인원 {members}명이 있습니다. "
+                     f"reassign_to로 옮길 부서를 지정하거나 먼저 이동시키세요.")
+        if reassign_to == did:
+            raise HTTPException(400, "자기 자신으로는 옮길 수 없습니다")
+        if not await store().get_department(reassign_to):
+            raise HTTPException(404, "옮길 부서가 없습니다")
+        moved = await store().reassign_dept_members(did, reassign_to)
+
+    stopped = await store().delete_department(did)
+    return {"ok": True, "name": dept["name"], "moved_users": moved,
+            "collection_stopped": len(stopped)}
+
+
 @api.post("/api/admin/users/{uid}/dept")
 async def api_user_move(uid: int, body: Dict = Body(...),
                         _: Dict = Depends(super_only)):
