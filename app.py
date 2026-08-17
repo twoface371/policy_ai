@@ -827,19 +827,146 @@ async def api_check_now(_: Dict = Depends(super_only)):
 # ============================================================
 @api.post("/api/watchlist")
 async def api_watch_add(body: Dict = Body(...),
-                        _: Dict = Depends(dept_admin_only)):
-    """감시 법령 추가. 전문은 다음 자동 적재(또는 서버 재시작) 때 수집된다."""
+                        user: Dict = Depends(dept_admin_only)):
+    """부서 감시 목록에 법령을 넣는다. 전문은 다음 자동 적재 때 수집된다.
+
+    이미 다른 부서가 보고 있는 법령이면 수집을 새로 하지 않고 그 항목에
+    붙는다 — 과거 개정 이력까지 즉시 함께 보인다.
+
+    전사 관리자는 소속 부서가 없으므로 dept_id를 지정해야 한다. 부서
+    관리자는 지정하든 말든 자기 부서에만 넣는다(남의 부서 목록을 건드릴
+    수 있으면 권한을 나눈 의미가 없다).
+    """
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "법령명을 입력하세요")
     category = body.get("category") or "법령"
     if category not in ("법령", "행정규칙", "정보시스템 운영"):
         category = "법령"
-    ok = await store().add_watch(name, memo=body.get("memo", ""),
-                                 ministry=body.get("ministry", ""),
-                                 category=category)
-    if not ok:
-        raise HTTPException(409, "이미 등록된 법령입니다")
+
+    dept_id = (body.get("dept_id") if user["role"] == "superadmin"
+               else user["dept_id"])
+    if not dept_id:
+        raise HTTPException(400, "부서를 지정하세요")
+
+    wid = await store().ensure_watch(name, ministry=body.get("ministry", ""),
+                                     category=category)
+    if not await store().add_dept_watch(dept_id, wid, added_by=user["id"]):
+        raise HTTPException(409, "이미 부서 목록에 있는 법령입니다")
+    return {"ok": True, "watch_id": wid}
+
+
+@api.delete("/api/dept/watchlist/{wid}")
+async def api_dept_watch_del(wid: int, user: Dict = Depends(dept_admin_only),
+                             dept_id: Optional[int] = None):
+    """부서 목록에서만 뺀다. 수집된 전문·이력·분석은 지우지 않는다.
+
+    다른 부서나 개인이 아직 이 법령을 보고 있으면 수집은 계속 돈다.
+    마지막 구독자였을 때만 전역 수집이 멈추고, 그때도 데이터는 남는다.
+    """
+    target = dept_id if user["role"] == "superadmin" else user["dept_id"]
+    if not target:
+        raise HTTPException(400, "부서를 지정하세요")
+    if not await store().del_dept_watch(target, wid):
+        raise HTTPException(404, "부서 목록에 없는 법령입니다")
+    left = await store().watch_subscriber_count(wid)
+    return {"ok": True, "remaining_subscribers": left,
+            "collection_stopped": left == 0}
+
+
+@api.post("/api/dept/watchlist/{wid}/toggle")
+async def api_dept_watch_toggle(wid: int, body: Dict = Body(...),
+                                user: Dict = Depends(dept_admin_only),
+                                dept_id: Optional[int] = None):
+    """부서 단위 중지. 목록에는 남고 부서원 화면에서만 빠진다.
+
+    전역 수집은 그대로 돈다 — 다시 켰을 때 그 사이 개정이 비어 있으면
+    안 되기 때문이다.
+    """
+    target = dept_id if user["role"] == "superadmin" else user["dept_id"]
+    if not target:
+        raise HTTPException(400, "부서를 지정하세요")
+    enabled = bool(body.get("enabled"))
+    if not await store().toggle_dept_watch(target, wid, enabled):
+        raise HTTPException(404, "부서 목록에 없는 법령입니다")
+    return {"ok": True, "enabled": enabled}
+
+
+@api.get("/api/admin/watchlist")
+async def api_watch_list_global(_: Dict = Depends(super_only)):
+    """전사 감시 대상 전체 + 구독처 수.
+
+    /api/watchlist는 '내 목록'이라 부서가 없는 전사 관리자에게는 빈 목록이
+    된다. 전역 토글·삭제의 대상을 보려면 이 경로가 필요하다.
+    """
+    return await store().list_watch_global()
+
+
+@api.get("/api/dept/watchlist")
+async def api_dept_watch_list(user: Dict = Depends(dept_admin_only),
+                              dept_id: Optional[int] = None):
+    """부서 목록 관리 화면용 — 부서가 꺼 둔 것도 함께 준다."""
+    target = dept_id if user["role"] == "superadmin" else user["dept_id"]
+    if not target:
+        raise HTTPException(400, "부서를 지정하세요")
+    return await store().list_dept_watch(target)
+
+
+# ============================================================
+# 내 목록 — 일반 사용자가 자기 화면만 손대는 경로
+# ============================================================
+@api.post("/api/my/watchlist/{wid}/mute")
+async def api_my_mute(wid: int, request: Request, body: Dict = Body(...)):
+    """개인 숨김 on/off — 일반 사용자의 '중지'.
+
+    수집은 계속 돈다. 내 화면과 리포트에서만 빠지므로, 되돌리면 그 사이
+    개정까지 그대로 보인다. 전역 수집을 멈추는 관리자용 토글과는 다른
+    층이며, 이쪽은 남에게 아무 영향이 없다.
+    """
+    if not await store().watch_source_for_user(current_user(request)["id"], wid):
+        raise HTTPException(404, "내 목록에 없는 법령입니다")
+    await store().set_mute(current_user(request)["id"], wid,
+                           bool(body.get("muted")))
+    return {"ok": True, "muted": bool(body.get("muted"))}
+
+
+@api.post("/api/my/watchlist")
+async def api_my_watch_add(request: Request, body: Dict = Body(...)):
+    """개인 추가 — 부서 목록에 없지만 내 업무에 필요한 법령.
+
+    부서 목록은 건드리지 않고 내 화면에만 붙는다. 이미 수집 중인
+    법령이면 새로 받지 않고 그 항목을 함께 쓴다.
+    """
+    user = current_user(request)
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "법령명을 입력하세요")
+    category = body.get("category") or "법령"
+    if category not in ("법령", "행정규칙", "정보시스템 운영"):
+        category = "법령"
+    wid = await store().ensure_watch(name, ministry=body.get("ministry", ""),
+                                     category=category)
+    if await store().watch_source_for_user(user["id"], wid) == "dept":
+        raise HTTPException(409, "부서 목록에 이미 있는 법령입니다")
+    if not await store().add_user_extra(user["id"], wid):
+        raise HTTPException(409, "이미 추가한 법령입니다")
+    return {"ok": True, "watch_id": wid}
+
+
+@api.delete("/api/my/watchlist/{wid}")
+async def api_my_watch_del(wid: int, request: Request):
+    """내가 추가한 법령만 뺀다.
+
+    부서 목록의 법령은 뺄 수 없다 — 일반 사용자에게 허용된 것은 '중지'
+    (개인 숨김)까지다. 부서 목록에서 빼는 것은 부서 관리자의 일이다.
+    """
+    user = current_user(request)
+    src = await store().watch_source_for_user(user["id"], wid)
+    if src == "dept":
+        raise HTTPException(
+            403, "부서 목록의 법령입니다. 중지만 할 수 있습니다.")
+    if not await store().del_user_extra(user["id"], wid):
+        raise HTTPException(404, "내가 추가한 법령이 아닙니다")
     return {"ok": True}
 
 
@@ -870,13 +997,17 @@ async def api_watch_data(wid: int, _: Dict = Depends(dept_admin_only)):
 
 
 @api.delete("/api/watchlist/{wid}")
-async def api_watch_del(wid: int, purge: bool = False,
+async def api_watch_del(wid: int, purge: bool = False, force: bool = False,
                         _: Dict = Depends(super_only)):
-    """감시 목록에서 제거. purge=true면 수집된 전문·판본·조항·부칙까지 지운다.
+    """감시 항목을 전사에서 완전히 제거. purge=true면 전문·판본·조항까지 지운다.
 
-    지금은 watchlist 행을 통째로 지워 모든 부서·개인의 구독까지 함께
-    끊는다(FK가 CASCADE다). 그래서 전사 관리자로 묶어 둔다. 부서 관리자가
-    '우리 부서 목록에서만 빼는' 경로는 구독 분리 단계에서 따로 만든다.
+    watchlist 행을 지우면 FK CASCADE로 모든 부서·개인의 구독이 함께 끊긴다.
+    그래서 아직 보는 사람이 있으면 기본적으로 거부하고, 몇 곳이 걸려 있는지
+    알려 준다. 정말 지우려면 force=true를 준다.
+
+    '우리 부서에서만 빼기'는 이 경로가 아니다 —
+    DELETE /api/dept/watchlist/{wid}가 그 일을 하며, 마지막 구독자가
+    빠질 때 수집만 멈추고 데이터는 남긴다.
 
     purge를 켜도 개정 이력(law_changes)과 분석 결과(analyses)는 남긴다.
     재수집으로 복구되지 않는 자산이고, AI 분석은 실제 비용이 들어간 결과다.
@@ -884,12 +1015,19 @@ async def api_watch_del(wid: int, purge: bool = False,
     w = await store().get_watch(wid)
     if not w:
         raise HTTPException(404, "해당 감시 항목이 없습니다")
+    subs = await store().watch_subscriber_count(wid)
+    if subs and not force:
+        raise HTTPException(
+            409, f"{subs}곳이 이 법령을 목록에 두고 있습니다. "
+                 f"부서 목록에서만 빼려면 부서 삭제를 쓰고, "
+                 f"전사에서 지우려면 force=true를 주세요.")
     purged = {}
     if purge and w["law_id"]:
         purged = await store().law_data_stats(w["law_id"])
         await store().delete_fulltext(w["law_id"])
     await store().del_watch(wid)
-    return {"ok": True, "name": w["name"], "purged": purged}
+    return {"ok": True, "name": w["name"], "purged": purged,
+            "unsubscribed": subs}
 
 
 @api.delete("/api/fulltext/{law_id}")

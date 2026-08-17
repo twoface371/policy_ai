@@ -988,6 +988,182 @@ class Store:
             (user_id, user_id, user_id))
         return [r[0] for r in rows]
 
+    async def list_watch_global(self) -> List[Dict]:
+        """전사 감시 대상 전체 + 어디서 구독 중인지.
+
+        전사 관리자용이다. /api/watchlist는 '내 목록'을 주므로, 부서가 없는
+        전사 관리자에게는 빈 목록이 된다. 관리 대상을 볼 경로가 따로 필요하다.
+        """
+        return [{"id": r[0], "name": r[1], "enabled": bool(r[2]),
+                 "ministry": r[3] or "", "category": r[4] or "",
+                 "law_id": r[5] or "", "status": r[6] or "pending",
+                 "last_updated": r[7] or "",
+                 "dept_count": r[8], "user_count": r[9],
+                 "subscribers": r[8] + r[9]}
+                for r in await self._fetch(
+                    "SELECT w.id,w.name,w.enabled,w.ministry,w.category,"
+                    "       w.law_id,w.status,w.last_updated,"
+                    "  (SELECT COUNT(*) FROM dept_watch d WHERE d.watch_id=w.id),"
+                    "  (SELECT COUNT(*) FROM user_watch_extra u"
+                    "    WHERE u.watch_id=w.id)"
+                    " FROM watchlist w ORDER BY w.id")]
+
+    async def watch_source_for_user(self, user_id: int,
+                                    watch_id: int) -> Optional[str]:
+        """이 법령이 내 목록에 어떻게 들어와 있는가 — 'dept'/'personal'/None.
+
+        숨김 여부는 보지 않는다. 숨긴 것도 '내 목록에 있는 것'이라
+        되돌릴 수 있어야 한다.
+        """
+        r = await self._fetch(
+            "SELECT CASE WHEN EXISTS ("
+            "         SELECT 1 FROM dept_watch dw WHERE dw.watch_id=%s"
+            "          AND dw.enabled=1"
+            "          AND dw.dept_id=(SELECT dept_id FROM users WHERE id=%s))"
+            "       THEN 'dept'"
+            "       WHEN EXISTS ("
+            "         SELECT 1 FROM user_watch_extra ux"
+            "          WHERE ux.watch_id=%s AND ux.user_id=%s)"
+            "       THEN 'personal' ELSE '' END",
+            (watch_id, user_id, watch_id, user_id))
+        return (r[0][0] or None) if r else None
+
+    async def set_mute(self, user_id: int, watch_id: int, muted: bool):
+        """개인 숨김 on/off — 일반 사용자의 '중지'.
+
+        watchlist.enabled는 건드리지 않는다. 수집은 계속 돌고 내 화면에서만
+        빠진다. 이 구분이 이 기능의 전부다.
+        """
+        if muted:
+            await self._exec(
+                "INSERT INTO user_watch_mute (user_id,watch_id,created_at) "
+                "VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+                (user_id, watch_id,
+                 datetime.now().isoformat(timespec="seconds")))
+        else:
+            await self._exec("DELETE FROM user_watch_mute "
+                             "WHERE user_id=%s AND watch_id=%s",
+                             (user_id, watch_id))
+
+    async def ensure_watch(self, name: str, ministry: str = "",
+                           category: str = "법령") -> int:
+        """이름으로 watchlist 행을 찾고, 없으면 만들어 id를 준다.
+
+        같은 법령을 두 부서가 각각 등록해도 수집은 한 번만 돌아야 한다.
+        그래서 이름이 겹치면 새로 만들지 않고 기존 행을 함께 쓴다.
+        """
+        name = (name or "").strip()
+        r = await self._fetch("SELECT id FROM watchlist WHERE name=%s", (name,))
+        if r:
+            return r[0][0]
+        await self._exec(
+            "INSERT INTO watchlist (name,enabled,ministry,category,created_at) "
+            "VALUES (%s,1,%s,%s,%s)",
+            (name, ministry, category,
+             datetime.now().isoformat(timespec="seconds")))
+        return (await self._fetch(
+            "SELECT id FROM watchlist WHERE name=%s", (name,)))[0][0]
+
+    async def _revive_if_first(self, watch_id: int, before: int):
+        """구독자가 0에서 1이 되는 순간에만 전역 수집을 되살린다.
+
+        무조건 켜지 않는 이유는, 전사 관리자가 다른 이유로 꺼 둔 것을
+        부서 하나가 추가했다고 뒤집으면 안 되기 때문이다. 이미 구독자가
+        있던 항목의 enabled는 관리자의 판단이므로 손대지 않는다.
+        """
+        if before == 0:
+            await self._exec("UPDATE watchlist SET enabled=1 WHERE id=%s",
+                             (watch_id,))
+
+    async def _retire_if_last(self, watch_id: int):
+        """마지막 구독자가 빠지면 수집만 멈춘다. 데이터는 지우지 않는다.
+
+        이것이 '한 부서의 삭제가 다른 부서를 끊지 않게' 하는 지점이다.
+        """
+        if await self.watch_subscriber_count(watch_id) == 0:
+            await self._exec("UPDATE watchlist SET enabled=0 WHERE id=%s",
+                             (watch_id,))
+
+    # ---------- 부서 목록 (dept_admin) ----------
+    async def add_dept_watch(self, dept_id: int, watch_id: int,
+                             added_by: Optional[int] = None) -> bool:
+        """부서 목록에 넣는다. 이미 있으면 False."""
+        if await self._fetch("SELECT 1 FROM dept_watch "
+                             "WHERE dept_id=%s AND watch_id=%s",
+                             (dept_id, watch_id)):
+            return False
+        before = await self.watch_subscriber_count(watch_id)
+        await self._exec(
+            "INSERT INTO dept_watch (dept_id,watch_id,added_by,created_at) "
+            "VALUES (%s,%s,%s,%s)",
+            (dept_id, watch_id, added_by,
+             datetime.now().isoformat(timespec="seconds")))
+        await self._revive_if_first(watch_id, before)
+        return True
+
+    async def del_dept_watch(self, dept_id: int, watch_id: int) -> bool:
+        """부서 목록에서만 뺀다. 전문·이력·분석은 그대로 남는다."""
+        if not await self._fetch("SELECT 1 FROM dept_watch "
+                                 "WHERE dept_id=%s AND watch_id=%s",
+                                 (dept_id, watch_id)):
+            return False
+        await self._exec("DELETE FROM dept_watch "
+                         "WHERE dept_id=%s AND watch_id=%s", (dept_id, watch_id))
+        await self._retire_if_last(watch_id)
+        return True
+
+    async def toggle_dept_watch(self, dept_id: int, watch_id: int,
+                                enabled: bool) -> bool:
+        """부서 단위 중지. 목록에는 남고 부서원 화면에서만 빠진다."""
+        if not await self._fetch("SELECT 1 FROM dept_watch "
+                                 "WHERE dept_id=%s AND watch_id=%s",
+                                 (dept_id, watch_id)):
+            return False
+        await self._exec("UPDATE dept_watch SET enabled=%s "
+                         "WHERE dept_id=%s AND watch_id=%s",
+                         (1 if enabled else 0, dept_id, watch_id))
+        return True
+
+    async def list_dept_watch(self, dept_id: int) -> List[Dict]:
+        """부서 목록 그대로 — 관리 화면용이라 부서가 끈 것도 함께 준다."""
+        return [{"id": r[0], "name": r[1], "enabled": bool(r[2]),
+                 "ministry": r[3] or "", "category": r[4] or "",
+                 "law_id": r[5] or "", "status": r[6] or "pending",
+                 "global_enabled": bool(r[7])}
+                for r in await self._fetch(
+                    "SELECT w.id,w.name,dw.enabled,w.ministry,w.category,"
+                    "       w.law_id,w.status,w.enabled"
+                    "  FROM dept_watch dw JOIN watchlist w ON w.id=dw.watch_id"
+                    " WHERE dw.dept_id=%s ORDER BY w.id", (dept_id,))]
+
+    # ---------- 개인 추가분 (member) ----------
+    async def add_user_extra(self, user_id: int, watch_id: int) -> bool:
+        if await self._fetch("SELECT 1 FROM user_watch_extra "
+                             "WHERE user_id=%s AND watch_id=%s",
+                             (user_id, watch_id)):
+            return False
+        before = await self.watch_subscriber_count(watch_id)
+        await self._exec(
+            "INSERT INTO user_watch_extra (user_id,watch_id,created_at) "
+            "VALUES (%s,%s,%s)",
+            (user_id, watch_id, datetime.now().isoformat(timespec="seconds")))
+        await self._revive_if_first(watch_id, before)
+        return True
+
+    async def del_user_extra(self, user_id: int, watch_id: int) -> bool:
+        if not await self._fetch("SELECT 1 FROM user_watch_extra "
+                                 "WHERE user_id=%s AND watch_id=%s",
+                                 (user_id, watch_id)):
+            return False
+        await self._exec("DELETE FROM user_watch_extra "
+                         "WHERE user_id=%s AND watch_id=%s", (user_id, watch_id))
+        # 숨김 표시도 같이 치운다 — 목록에서 뺀 것의 숨김은 의미가 없고,
+        # 나중에 다시 넣었을 때 숨겨진 채로 나타나면 사라진 것처럼 보인다.
+        await self._exec("DELETE FROM user_watch_mute "
+                         "WHERE user_id=%s AND watch_id=%s", (user_id, watch_id))
+        await self._retire_if_last(watch_id)
+        return True
+
     async def watch_subscriber_count(self, watch_id: int) -> int:
         """이 법령을 목록에 걸어 둔 부서 + 개인의 수.
 
