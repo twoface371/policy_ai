@@ -14,11 +14,13 @@ analyzer.py — 문서 법령 저촉 분석기 (단독 검증용)
   python analyzer.py --selftest            # 내장 테스트
 ================================================================================
 """
+import html
 import re
 import sys
 import os
 import subprocess
 import zipfile
+import xml.etree.ElementTree as ET
 from typing import List, Dict
 
 
@@ -107,19 +109,49 @@ def _from_hwp_api(path: str) -> str:
 
 
 def _from_hwpx(path: str) -> str:
-    """한글 신형 (.hwpx) — zip 기반. section*.xml에서 텍스트 추출."""
+    """한글 신형 (.hwpx) — zip 기반. section*.xml에서 텍스트 추출.
+
+    XML 파서로 읽는다. 정규식으로 <hp:t>를 긁으면 두 가지가 틀어진다.
+
+    1. 엔티티가 그대로 남는다. 조문의 '<개정 2011.6.7>'이
+       '&lt;개정 2011.6.7&gt;'로 나오는데, 법령 문서에 아주 흔한 표기다.
+    2. 접두사가 hp:가 아니거나 <hp:t> 에 속성이 붙으면 통째로 놓친다.
+
+    이름공간 URI는 판본마다 다를 수 있어 지역명('t')으로 맞춘다.
+    """
     texts = []
     with zipfile.ZipFile(path) as z:
         sections = sorted(n for n in z.namelist()
                           if re.match(r"Contents/section\d+\.xml", n))
         for name in sections:
-            xml = z.read(name).decode("utf-8", errors="replace")
-            # <hp:t>...</hp:t> 안의 텍스트가 본문
-            for m in re.finditer(r"<hp:t>(.*?)</hp:t>", xml, re.DOTALL):
-                t = re.sub(r"<[^>]+>", "", m.group(1))
+            raw = z.read(name)
+            try:
+                root = ET.fromstring(raw)
+            except ET.ParseError:
+                # 조금 깨진 파일이라도 읽히면 읽는다. 예전 정규식 방식에
+                # 엔티티 복원만 붙인 것이다.
+                texts.extend(_hwpx_text_by_regex(
+                    raw.decode("utf-8", errors="replace")))
+                continue
+            for el in root.iter():
+                if el.tag.rsplit("}", 1)[-1] != "t":
+                    continue
+                # 자식 요소(밑줄 표시 등)가 섞여 있어도 글자만 이어 붙인다
+                t = "".join(el.itertext())
                 if t.strip():
                     texts.append(t)
     return "\n".join(texts)
+
+
+def _hwpx_text_by_regex(xml: str) -> List[str]:
+    """XML 파싱이 실패했을 때의 대비책. 태그를 벗기고 엔티티를 되돌린다."""
+    out = []
+    for m in re.finditer(r"<(?:\w+:)?t(?:\s[^>]*)?>(.*?)</(?:\w+:)?t>",
+                         xml, re.DOTALL):
+        t = html.unescape(re.sub(r"<[^>]+>", "", m.group(1)))
+        if t.strip():
+            out.append(t)
+    return out
 
 
 # ============================================================
