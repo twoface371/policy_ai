@@ -40,32 +40,52 @@ from typing import Dict, List
 # reportlab은 woff2를 못 읽는다. 화면용 PretendardVariable.woff2 는 여기
 # 쓸 수 없으므로, 같은 글꼴로 맞추려면 TTF 판을 따로 넣어야 한다.
 FONT_NAME = "KoreanSans"
+FONT_NAME_BOLD = "KoreanSans-Bold"
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _BUNDLED_FONT_DIR = os.path.join(_BASE_DIR, "static", "fonts")
 
-# (경로, TTC 안에서 몇 번째 글꼴인지) — TTF면 인덱스는 무시된다.
+
+def _bundled(name):
+    return os.path.join(_BUNDLED_FONT_DIR, name)
+
+
+# (보통, 굵게, TTC 인덱스). 굵게가 없으면 None — 그때는 <b>가 보통 굵기로
+# 나오지만 글자는 제대로 찍힌다. TTF면 인덱스는 무시된다.
+#
+# 시스템 글꼴을 먼저 쓴다. 그 편이 굵은체 짝이 있어 <b>가 살고, 동봉본
+# 9.9MB를 매번 읽지 않는다. 동봉본은 글꼴이 아예 없는 환경(폐쇄망 리눅스
+# 서버 등)의 안전망이다.
+#
+# 글꼴을 고를 때 한글만 보면 안 된다. 법령 조문에는 항 번호 ①②③ 과
+# 한자가 섞여 있어서, 이것이 빠진 글꼴을 쓰면 그 자리가 빈칸으로 찍힌다.
+# 나눔고딕(구글 배포본)이 딱 그래서 뺐다 — 한글은 멀쩡한데 ① 과 條 가 없다.
 _FONT_CANDIDATES = [
-    (os.path.join(_BUNDLED_FONT_DIR, "PretendardVariable.ttf"), 0),
-    (os.path.join(_BUNDLED_FONT_DIR, "Pretendard-Regular.ttf"), 0),
-    (os.path.join(_BUNDLED_FONT_DIR, "NanumGothic.ttf"), 0),
-    ("/System/Library/Fonts/Supplemental/AppleGothic.ttf", 0),   # macOS
-    ("C:/Windows/Fonts/malgun.ttf", 0),                          # 맑은 고딕
-    ("C:/Windows/Fonts/NanumGothic.ttf", 0),
-    ("C:/Windows/Fonts/gulim.ttc", 0),                           # 굴림
-    ("C:/Windows/Fonts/batang.ttc", 0),                          # 바탕
-    ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", 0),      # Linux
-    ("/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf", 0),
-    ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 1),
-    ("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", 1),
+    # macOS — 굵은체 짝이 따로 없다
+    ("/System/Library/Fonts/Supplemental/AppleGothic.ttf", None, 0),
+    # Windows — 맑은 고딕은 굵은체가 있다
+    ("C:/Windows/Fonts/malgun.ttf", "C:/Windows/Fonts/malgunbd.ttf", 0),
+    ("C:/Windows/Fonts/batang.ttc", None, 0),
+    # Linux
+    ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", None, 1),
+    ("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", None, 1),
+    ("/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+     "/usr/share/fonts/truetype/nanum/NanumBarunGothicBold.ttf", 0),
+    # 동봉 — 마지막 안전망. 한글·한자·①②③ 를 모두 덮는다
+    (_bundled("NotoSansKR-Regular.ttf"), None, 0),
 ]
 
 
 def _find_font():
-    """쓸 수 있는 첫 글꼴. 없으면 None."""
+    """(보통 경로, 굵게 경로 또는 None, TTC 인덱스). 없으면 None.
+
+    POLICY_AI_PDF_FONT 로 못박으면 그것만 쓴다(굵게는 없는 것으로 본다).
+    """
     env = os.getenv("POLICY_AI_PDF_FONT")
-    for path, idx in ([(env, 0)] if env else []) + _FONT_CANDIDATES:
-        if path and os.path.exists(path):
-            return path, idx
+    if env and os.path.exists(env):
+        return env, None, 0
+    for regular, bold, idx in _FONT_CANDIDATES:
+        if os.path.exists(regular):
+            return regular, (bold if bold and os.path.exists(bold) else None), idx
     return None
 
 # 검사 결과가 답하는 범위. 문서만 따로 돌아다니면 과신하기 쉬워 본문에 박아 둔다.
@@ -374,15 +394,24 @@ def _register_font():
     if not found:
         raise RuntimeError(
             "PDF에 쓸 한글 글꼴을 찾지 못했습니다. 한글 TTF 파일을 "
-            f"{_BUNDLED_FONT_DIR} 에 NanumGothic.ttf 로 넣거나, "
+            f"{_BUNDLED_FONT_DIR} 에 NanumGothic-Regular.ttf 로 넣거나, "
             "POLICY_AI_PDF_FONT 환경변수에 글꼴 경로를 지정하세요. "
             "(마크다운·한글 내려받기는 글꼴 없이도 됩니다)")
-    path, idx = found
+    regular, bold, idx = found
     try:
-        pdfmetrics.registerFont(TTFont(FONT_NAME, path, subfontIndex=idx))
+        pdfmetrics.registerFont(TTFont(FONT_NAME, regular, subfontIndex=idx))
+        if bold:
+            pdfmetrics.registerFont(TTFont(FONT_NAME_BOLD, bold,
+                                           subfontIndex=idx))
     except Exception as e:
         raise RuntimeError(
-            f"한글 글꼴을 읽지 못했습니다: {path} — {e}") from e
+            f"한글 글꼴을 읽지 못했습니다: {regular} — {e}") from e
+    # 패밀리를 묶어야 <b>가 굵은 글꼴을 탄다. 안 묶으면 reportlab이 조용히
+    # 보통 굵기로 그려서, 표 머리글과 라벨이 본문과 구분되지 않는다.
+    pdfmetrics.registerFontFamily(
+        FONT_NAME, normal=FONT_NAME,
+        bold=FONT_NAME_BOLD if bold else FONT_NAME,
+        italic=FONT_NAME, boldItalic=FONT_NAME_BOLD if bold else FONT_NAME)
 
 
 def to_pdf(result: Dict) -> bytes:
