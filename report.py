@@ -4,8 +4,9 @@ report.py — 문서 검사 결과 → 마크다운 / PDF / 한글(hwpx)
 checker.run() 또는 /api/check-document 가 만든 결과 dict 하나를 받아
 사람이 읽는 문서로 만든다. 조회·판정은 하지 않는다 — 렌더링만 한다.
 
-PDF는 reportlab + AppleGothic(맥 기본 탑재)으로 만든다. 한글 글꼴을 등록하지
-않으면 전부 검은 네모로 나오므로 글꼴 등록이 실패하면 PDF를 만들지 않는다.
+PDF는 reportlab으로 만든다. 한글 글꼴을 OS별로 찾아 쓰고(_FONT_CANDIDATES),
+못 찾으면 PDF를 만들지 않는다 — 글꼴 없이 만들면 한글이 전부 검은 네모로
+찍힌 파일이 나와서 실패가 성공처럼 보인다.
 
 한글은 hwpx(OWPML)로 낸다. 구형 .hwp 바이너리는 파이썬으로 쓸 수 없다 —
 pyhwp는 읽기 전용이고, 쓰기가 되는 pyhwpx는 한컴오피스가 깔린 윈도우에서만
@@ -26,9 +27,46 @@ import io
 import os
 from typing import Dict, List
 
-# 맥에 기본으로 깔려 있는 한글 TTF. TTC가 아니라 TTF라 reportlab이 바로 읽는다.
-FONT_PATH = "/System/Library/Fonts/Supplemental/AppleGothic.ttf"
-FONT_NAME = "AppleGothic"
+# PDF에 쓸 한글 글꼴.
+#
+# 한 경로를 못박아 두면 그 OS에서만 PDF가 나온다(예전에는 맥 경로만 있어서
+# 윈도우·리눅스에서 내려받기가 500으로 실패했다). 앞에서부터 있는 것을 쓴다.
+#
+#   1. POLICY_AI_PDF_FONT 환경변수 — 운영자가 못박고 싶을 때
+#   2. static/fonts/ 에 넣어 둔 TTF — 넣어 두면 어느 OS에서나 같은 모양이
+#      나오고 폐쇄망에서도 확실하다. 저장소에는 기본으로 넣지 않았다(용량)
+#   3. OS 기본 한글 글꼴
+#
+# reportlab은 woff2를 못 읽는다. 화면용 PretendardVariable.woff2 는 여기
+# 쓸 수 없으므로, 같은 글꼴로 맞추려면 TTF 판을 따로 넣어야 한다.
+FONT_NAME = "KoreanSans"
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_BUNDLED_FONT_DIR = os.path.join(_BASE_DIR, "static", "fonts")
+
+# (경로, TTC 안에서 몇 번째 글꼴인지) — TTF면 인덱스는 무시된다.
+_FONT_CANDIDATES = [
+    (os.path.join(_BUNDLED_FONT_DIR, "PretendardVariable.ttf"), 0),
+    (os.path.join(_BUNDLED_FONT_DIR, "Pretendard-Regular.ttf"), 0),
+    (os.path.join(_BUNDLED_FONT_DIR, "NanumGothic.ttf"), 0),
+    ("/System/Library/Fonts/Supplemental/AppleGothic.ttf", 0),   # macOS
+    ("C:/Windows/Fonts/malgun.ttf", 0),                          # 맑은 고딕
+    ("C:/Windows/Fonts/NanumGothic.ttf", 0),
+    ("C:/Windows/Fonts/gulim.ttc", 0),                           # 굴림
+    ("C:/Windows/Fonts/batang.ttc", 0),                          # 바탕
+    ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", 0),      # Linux
+    ("/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf", 0),
+    ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 1),
+    ("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", 1),
+]
+
+
+def _find_font():
+    """쓸 수 있는 첫 글꼴. 없으면 None."""
+    env = os.getenv("POLICY_AI_PDF_FONT")
+    for path, idx in ([(env, 0)] if env else []) + _FONT_CANDIDATES:
+        if path and os.path.exists(path):
+            return path, idx
+    return None
 
 # 검사 결과가 답하는 범위. 문서만 따로 돌아다니면 과신하기 쉬워 본문에 박아 둔다.
 _COMMON_LIMIT = (
@@ -70,8 +108,8 @@ _AXIS_HINT = ("판정은 두 축이다. **법령명**은 인용한 이름이 지
 # 화면은 색점으로 가르지만 이 문서는 흑백으로 인쇄되기도 하고 마크다운에는
 # 색이 아예 없다. 글자만 늘어놓으면 어느 줄이 문제인지 훑어서 알 수 없다.
 # ○△×는 국내 행정문서에서 오래 쓰인 표기라 따로 설명할 것이 없고,
-# PDF 글꼴(AppleGothic)에 모두 들어 있다 — ✓·✕·✗는 글꼴에 없거나 미덥지
-# 않아 네모로 찍힐 수 있으므로 쓰지 않는다.
+# KS X 1001 기호라 한글 글꼴이면 대개 들어 있다 — ✓·✕·✗는 AppleGothic에
+# 없거나 미덥지 않아 네모로 찍힐 수 있으므로 쓰지 않는다.
 MARK = {
     "정상": "○", "변경 없음": "○",
     "개명 의심": "△", "개정됨": "△", "신설": "△",
@@ -319,19 +357,32 @@ def to_markdown(result: Dict) -> str:
 # PDF
 # ============================================================
 def font_available() -> bool:
-    return os.path.exists(FONT_PATH)
+    return _find_font() is not None
 
 
 def _register_font():
-    """한글 글꼴 등록. 이미 등록돼 있으면 다시 하지 않는다."""
+    """한글 글꼴 등록. 이미 등록돼 있으면 다시 하지 않는다.
+
+    등록에 실패하면 PDF를 만들지 않는다. 글꼴 없이 만들면 한글이 전부
+    검은 네모로 찍힌 파일이 나오는데, 그건 실패를 성공처럼 보이게 한다.
+    """
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
     if FONT_NAME in pdfmetrics.getRegisteredFontNames():
         return
-    if not font_available():
+    found = _find_font()
+    if not found:
         raise RuntimeError(
-            f"한글 글꼴을 찾을 수 없습니다: {FONT_PATH}. PDF를 만들 수 없습니다.")
-    pdfmetrics.registerFont(TTFont(FONT_NAME, FONT_PATH))
+            "PDF에 쓸 한글 글꼴을 찾지 못했습니다. 한글 TTF 파일을 "
+            f"{_BUNDLED_FONT_DIR} 에 NanumGothic.ttf 로 넣거나, "
+            "POLICY_AI_PDF_FONT 환경변수에 글꼴 경로를 지정하세요. "
+            "(마크다운·한글 내려받기는 글꼴 없이도 됩니다)")
+    path, idx = found
+    try:
+        pdfmetrics.registerFont(TTFont(FONT_NAME, path, subfontIndex=idx))
+    except Exception as e:
+        raise RuntimeError(
+            f"한글 글꼴을 읽지 못했습니다: {path} — {e}") from e
 
 
 def to_pdf(result: Dict) -> bytes:
