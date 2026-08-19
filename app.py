@@ -115,7 +115,12 @@ SESSION_COOKIE = "policy_ai_session"
 # 로그인 없이 닿을 수 있는 경로. 여기 없는 것은 전부 막힌다.
 # 화이트리스트로 두는 이유는 새 엔드포인트가 자동으로 보호되게 하려는 것이다.
 # 열거로 두면 추가할 때마다 데코레이터 붙이는 것을 잊어 구멍이 난다.
-PUBLIC_PATHS = {"/login", "/api/auth/login"}
+#
+# 글꼴은 로그인 화면에서도 필요하므로 열어 둔다. static/ 전체를 마운트해
+# 열지 않는 이유는 그러면 index.html까지 로그인 없이 읽히기 때문이다 —
+# 파일 하나만 이름으로 지정해 연다.
+FONT_PATH = "/fonts/PretendardVariable.woff2"
+PUBLIC_PATHS = {"/login", "/api/auth/login", FONT_PATH}
 
 
 @api.middleware("http")
@@ -794,27 +799,56 @@ async def index():
     return HTMLResponse(p.read_text(encoding="utf-8"))
 
 
+@api.get(FONT_PATH)
+async def font_pretendard():
+    """한글 글꼴. 폐쇄망을 전제로 CDN 대신 저장소에 넣어 두고 직접 준다."""
+    p = BASE_DIR / "static" / "fonts" / "PretendardVariable.woff2"
+    if not p.exists():
+        raise HTTPException(404, "글꼴 파일이 없습니다")
+    return FileResponse(
+        p, media_type="font/woff2",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
 # 로그인 화면. 로그인 없이는 아무 데도 못 가므로 이 페이지만 공개다.
 LOGIN_HTML = """<!doctype html><html lang="ko"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>로그인 — AI 법·정책 동향 분석 플랫폼</title>
 <style>
- body{font-family:-apple-system,'Apple SD Gothic Neo',sans-serif;
+ @font-face{font-family:'Pretendard Variable';font-weight:45 920;font-style:normal;
+   font-display:swap;src:url('/fonts/PretendardVariable.woff2') format('woff2-variations')}
+ *{box-sizing:border-box;margin:0;padding:0}
+ body{font-family:'Pretendard Variable',Pretendard,-apple-system,BlinkMacSystemFont,
+      'Apple SD Gothic Neo','Malgun Gothic',system-ui,sans-serif;
       display:flex;align-items:center;justify-content:center;min-height:100vh;
-      margin:0;background:#f5f6f8;color:#222}
- form{background:#fff;padding:32px;border-radius:10px;width:320px;
-      box-shadow:0 2px 12px rgba(0,0,0,.08)}
- h1{font-size:17px;margin:0 0 20px}
- label{display:block;font-size:13px;margin:14px 0 5px;color:#555}
- input{width:100%;padding:9px;border:1px solid #ccc;border-radius:5px;
-       font-size:14px;box-sizing:border-box}
- button{width:100%;margin-top:22px;padding:10px;border:0;border-radius:5px;
-        background:#2f6fed;color:#fff;font-size:14px;cursor:pointer}
- button:disabled{background:#9bb6ee;cursor:default}
- #err{color:#c0392b;font-size:13px;margin-top:14px;min-height:18px}
+      background:#fff;color:#262626;letter-spacing:-.2px;padding:24px;
+      -webkit-font-smoothing:antialiased}
+ form{width:100%;max-width:380px}
+ .mark{width:44px;height:44px;border-radius:13px;background:#1F3864;color:#fff;
+       display:flex;align-items:center;justify-content:center;
+       font-size:19px;font-weight:600;margin-bottom:26px}
+ h1{font-size:32px;font-weight:600;letter-spacing:-1.3px;line-height:1.2;
+    color:#1A1A1A}
+ /* 첫 라벨은 제목과 떨어뜨리고, 둘째부터는 입력칸 사이 간격으로 좁힌다 */
+ label{display:block;font-size:13px;font-weight:500;margin:30px 0 7px;color:#6E6E6E}
+ label:nth-of-type(2){margin-top:20px}
+ input{width:100%;padding:11px 13px;border:1px solid #DEDEE3;border-radius:10px;
+       font-family:inherit;font-size:15px;letter-spacing:-.2px;color:#262626;
+       transition:border-color .13s,box-shadow .13s}
+ input::placeholder{color:#AFB1B8}
+ input:focus{outline:0;border-color:#1F3864;box-shadow:0 0 0 3px rgba(31,56,100,.12)}
+ button{width:100%;margin-top:26px;padding:12px;border:0;border-radius:12px;
+        background:#1F3864;color:#fff;font-family:inherit;font-size:15px;
+        font-weight:500;letter-spacing:-.25px;cursor:pointer;
+        box-shadow:0 8px 18px -6px rgba(31,56,100,.5);
+        transition:background .13s,transform .13s}
+ button:hover:not(:disabled){background:#2A4A80;transform:translateY(-1px)}
+ button:disabled{opacity:.5;cursor:default}
+ #err{color:#A32D2D;font-size:13.5px;margin-top:16px;min-height:19px}
 </style>
 <form id="f">
-  <h1>AI 법·정책 동향 분석 플랫폼</h1>
+  <div class="mark">法</div>
+  <h1>AI 법·정책<br>동향 분석 플랫폼</h1>
   <label for="email">이메일</label>
   <input id="email" type="email" autocomplete="username" required autofocus>
   <label for="pw">비밀번호</label>
@@ -1665,23 +1699,34 @@ def api_check_del(cid: str, request: Request):
     return {"ok": True, "파일명": d.get("파일명", "")}
 
 
+# 형식별 (생성 함수, MIME). 한글은 hwpx로 낸다 — 구형 .hwp 바이너리는
+# 파이썬으로 쓸 수 없다(report.py 머리말 참고).
+_CHECK_FORMATS = {
+    "md": (lambda d: report.to_markdown(d).encode("utf-8"),
+           "text/markdown; charset=utf-8"),
+    "pdf": (report.to_pdf, "application/pdf"),
+    "hwpx": (report.to_hwpx,
+             "application/vnd.hancom.hwpx"),
+}
+
+
 @api.get("/api/checks/{cid}/download/{fmt}")
 def api_check_download(cid: str, fmt: str, request: Request):
-    """저장된 검사 결과를 마크다운 / PDF로 내려준다."""
-    if fmt not in ("md", "pdf"):
-        raise HTTPException(400, "md / pdf 만 지원합니다")
+    """저장된 검사 결과를 마크다운 / PDF / 한글(hwpx)로 내려준다."""
+    make = _CHECK_FORMATS.get(fmt)
+    if not make:
+        raise HTTPException(
+            400, f"{' / '.join(_CHECK_FORMATS)} 만 지원합니다")
     d = _load_check(cid, current_user(request))
     stem = os.path.splitext(d.get("파일명") or "검사결과")[0]
     name = f"{stem}_법령검사_{cid[:8]}.{fmt}"
-    if fmt == "md":
-        return Response(report.to_markdown(d).encode("utf-8"),
-                        media_type="text/markdown; charset=utf-8",
-                        headers={"Content-Disposition": _disposition(name)})
     try:
-        body = report.to_pdf(d)
-    except RuntimeError as e:      # 한글 글꼴 없음 — 네모만 찍힌 PDF를 주지 않는다
+        body = make[0](d)
+    except RuntimeError as e:
+        # 글꼴이 없거나(PDF) 패키지가 없으면(hwpx) 반쪽짜리 파일을 주지 않고
+        # 무엇이 없는지 그대로 알린다.
         raise HTTPException(500, str(e))
-    return Response(body, media_type="application/pdf",
+    return Response(body, media_type=make[1],
                     headers={"Content-Disposition": _disposition(name)})
 
 

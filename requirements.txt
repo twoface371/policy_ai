@@ -26,6 +26,9 @@ openpyxl                  # .xlsx / .xlsm 양식
 
 # ── 리포트 ──
 reportlab                 # PDF 출력. 한글 글꼴은 report.py 의 FONT_PATH 참조
+python-hwpx               # 한글(hwpx) 출력. lxml을 함께 끌고 온다.
+                          # 구형 .hwp 바이너리는 파이썬으로 쓸 수 없다 —
+                          # pyhwp는 읽기 전용, pyhwpx는 윈도우+한컴오피스 전용.
 
 # ── 선택 ──
 # openai                  # llm.enabled=true 로 AI 분석을 쓸 때만 필요
