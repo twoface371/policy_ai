@@ -1829,15 +1829,31 @@ async function loadGlobalWatch() {
   const rows = await api('/api/admin/watchlist');
   $('#gw-count').textContent = `${rows.length}건 · ` +
     `아무도 보지 않음 ${rows.filter(w => !w.subscribers).length}건`;
-  $('#gw-body').innerHTML = rows.map(w => `<tr${w.enabled ? '' : ' style="opacity:.5"'}>
+  $('#gw-body').innerHTML = rows.map(w => {
+    // enabled=수집 대상 on/off, status=실제 수집 성공 여부. 둘을 함께 보여야
+    // '수집 대상으로 켜뒀지만 실제론 못 찾은' 법령(예: 시행예정·폐지)이
+    // '수집'으로 잘못 보이지 않는다.
+    let tag;
+    if (!w.enabled) {
+      tag = '<span class="tag t-none">중단</span>';
+    } else if (w.status === 'loaded') {
+      tag = '<span class="tag t-relax">수집</span>';
+    } else if (w.status === 'notfound') {
+      tag = '<span class="tag t-restrict">검색안됨</span>';
+    } else if (w.status === 'empty') {
+      tag = '<span class="tag t-check">본문없음</span>';
+    } else {
+      tag = '<span class="tag t-check">미적재</span>';
+    }
+    return `<tr${w.enabled ? '' : ' style="opacity:.5"'}>
     <td>${esc(w.name)}</td>
     <td class="muted">${esc(w.ministry)}</td>
     <td class="muted">${w.dept_count}부서 / ${w.user_count}개인</td>
-    <td>${w.enabled ? '<span class="tag t-relax">수집</span>'
-                    : '<span class="tag t-none">중단</span>'}</td>
+    <td>${tag}</td>
     <td><button class="b g" style="padding:3px 9px;font-size:12px"
       onclick="delWatch(${w.id},'${esc(w.name)}')">완전 삭제</button></td>
-    </tr>`).join('') || '<tr><td colspan="5" class="muted">감시 대상이 없습니다.</td></tr>';
+    </tr>`;
+  }).join('') || '<tr><td colspan="5" class="muted">감시 대상이 없습니다.</td></tr>';
 }
 
 // ── 설정 ──
